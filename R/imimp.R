@@ -35,17 +35,19 @@
 imimp <-
 function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sampleID=NULL, n.mi=10, x.mar=50, y.mar=1000){
   
+  error_calib <- calibYhat - calibY
+  
   if(cdeType=="simple"){
     res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
     for(i in 1:n.mi){
-      res.mat[,i]<- sample(calibYhat, length(yhat), replace = T) + yhat
+      res.mat[,i]<- sample(error_calib, length(yhat), replace = T) + yhat
     }
   }
   
   if(cdeType=="local"){
     res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
     for(i in 1:n.mi){
-      res.mat[,i]<- CDE(calibY, calibYhat, yhat)
+      res.mat[,i]<- CDE(calibY, error_calib, yhat) + yhat
     }
   }
   
@@ -59,8 +61,9 @@ function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sa
         index.test.i <- which(sampleID[[2]] == test.i)
         train.slide.i <- sample(train.slides, 1)
         index.cali.i <- which(sampleID[[1]] == train.slide.i)
-        res.mat[index.test.i, i]<- CDE(calibY[index.cali.i], calibYhat[index.cali.i], 
-                                             yhat[index.test.i], xmar = x.mar, ymar=y.mar)
+        res.mat[index.test.i, i]<- CDE(calibY[index.cali.i], error_calib[index.cali.i], 
+                                             yhat[index.test.i], xmar = x.mar, ymar=y.mar)+yhat[index.test.i]
+        
       }
     }
     res.mat <- as.data.frame(res.mat)

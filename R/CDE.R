@@ -9,10 +9,21 @@
 
 CDE <-
 function(Ytrue, Yhat, Ytest, xmar=50, ymar=100){
+  # calculate a,b
+  ab <- cde.bandwidths(
+    x = Yhat, y = Ytrue, method=2
+  )
+  # a <- ab$a
+  # b <- ab$b
+  a=0.01
+  b=0.01
+  # use hdr cde
   fit_cde <- hdrcde::cde(
     x = Yhat, y = Ytrue,
     nxmargin = xmar,
-    nymargin = ymar
+    nymargin = ymar,
+    a=a,
+    b=b
   )
   cde_sample <- fit_cde$z %>% 
     apply(1, cumsum)
