@@ -1,25 +1,25 @@
 #' Function for conditional sampling
 #'
-#' @param Ytrue True value of calibration data
-#' @param Yhat Predicted value of calibration data
+#' @param Yhat True value of calibration data
+#' @param resid Predicted value of calibration data
 #' @param Ytest Predicted value of testing data
 #' @param xmar Number of bins for conditional density estimation
 #' @param ymar Number of bins for conditional density estimation
 #' @export
 
 CDE <-
-function(Ytrue, Yhat, Ytest, xmar=50, ymar=100){
+function(Yhat, resid, Ytest, xmar=50, ymar=100){
   # calculate a,b
   ab <- cde.bandwidths(
-    x = Yhat, y = Ytrue, method=2
+    x = Yhat, y = resid, method=2, xden="uniform"
   )
-  # a <- ab$a
-  # b <- ab$b
-  a=0.01
-  b=0.01
+  a <- ab$a
+  b <- ab$b
+  # a=0.01
+  # b=0.01
   # use hdr cde
   fit_cde <- hdrcde::cde(
-    x = Yhat, y = Ytrue,
+    x = Yhat, y = resid,
     nxmargin = xmar,
     nymargin = ymar,
     a=a,
@@ -27,8 +27,11 @@ function(Ytrue, Yhat, Ytest, xmar=50, ymar=100){
   )
   cde_sample <- fit_cde$z %>% 
     apply(1, cumsum)
-  cde_sample <- cde_sample / max(cde_sample)
-  cde_list <- list(x_grid = fit_cde$x, 
+  # remove all 0 columns
+  non0col <- which(colSums(cde_sample != 0) > 0)
+  cde_sample<- cde_sample[, non0col] 
+  cde_sample <- apply(cde_sample, 2, function(y){y/max(y)})
+  cde_list <- list(x_grid = fit_cde$x[non0col], 
               y_grid = fit_cde$y,
               cde_sample = cde_sample)
   

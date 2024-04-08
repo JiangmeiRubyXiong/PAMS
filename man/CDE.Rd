@@ -4,12 +4,12 @@
 \alias{CDE}
 \title{Function for conditional sampling}
 \usage{
-CDE(Ytrue, Yhat, Ytest, xmar = 50, ymar = 100)
+CDE(Yhat, resid, Ytest, xmar = 50, ymar = 100)
 }
 \arguments{
-\item{Ytrue}{True value of calibration data}
+\item{Yhat}{True value of calibration data}
 
-\item{Yhat}{Predicted value of calibration data}
+\item{resid}{Predicted value of calibration data}
 
 \item{Ytest}{Predicted value of testing data}
 
