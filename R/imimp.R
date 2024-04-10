@@ -8,7 +8,7 @@
 #' @param n.mi (optional) Number of multiple imputations. Default to be 10.
 #' @param x.mar (optional) Number of bins for conditional density estimation. Default to be 50.
 #' @param y.mar (optional) umber of bins for conditional density estimation. Default to be 1000.
-#' @importFrom hdrcde cde
+#' @importFrom hdrcde cde cde.bandwidths
 #' @importFrom stats rnorm runif
 #' @import dplyr
 #' @return

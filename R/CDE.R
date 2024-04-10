@@ -5,6 +5,7 @@
 #' @param Ytest Predicted value of testing data
 #' @param xmar Number of bins for conditional density estimation
 #' @param ymar Number of bins for conditional density estimation
+#' @importFrom hdrcde cde cde.bandwidths
 #' @export
 
 CDE <-
