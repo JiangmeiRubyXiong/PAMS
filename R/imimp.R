@@ -35,7 +35,7 @@
 imimp <-
 function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sampleID=NULL, n.mi=10, x.mar=50, y.mar=1000){
   
-  error_calib <- calibYhat - calibY
+  error_calib <- calibY - calibYhat
   
   if(cdeType=="simple"){
     res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
