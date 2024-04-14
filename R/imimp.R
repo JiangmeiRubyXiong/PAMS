@@ -45,10 +45,9 @@ function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sa
   }
   
   if(cdeType=="local"){
-    res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
-    for(i in 1:n.mi){
-      res.mat[,i]<- CDE(calibY, error_calib, yhat) + yhat
-    }
+    cde.obj <- fit_cde(calibYhat, error_calib, xmar = x.mar, ymar = y.mar)
+    res.mat <- sapply(vector("list", length = n.mi), function(x){CDE_sample(cde.obj, yhat) + yhat},
+                      simplify = TRUE)
   }
   
   if(cdeType=="bySample"){
@@ -56,18 +55,17 @@ function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sa
     res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
     test.slides <- unique(sampleID[[2]])
     train.slides <- unique(sampleID[[1]])
+    train.calibYhat.list <- split(calibYhat, sampleID[[1]])
+    train.error.list <- split(error_calib, sampleID[[1]])
+    cde.train.list <- mapply(fit_cde, train.calibYhat.list, train.error.list, MoreArgs = list(xmar = x.mar, ymar = y.mar),SIMPLIFY = FALSE)
     for(i in 1:n.mi){
       for(test.i in test.slides){
         index.test.i <- which(sampleID[[2]] == test.i)
         train.slide.i <- sample(train.slides, 1)
-        index.cali.i <- which(sampleID[[1]] == train.slide.i)
-        res.mat[index.test.i, i]<- CDE(calibY[index.cali.i], error_calib[index.cali.i], 
-                                             yhat[index.test.i], xmar = x.mar, ymar=y.mar)+yhat[index.test.i]
-        
+        res.mat[index.test.i, i]<- CDE_sample(cde.train.list[[train.slide.i]], 
+                                             yhat[index.test.i])+yhat[index.test.i]
       }
     }
-    res.mat <- as.data.frame(res.mat)
-    res.mat$slides <- sampleID[[2]]
   }
   
   return(res.mat)
