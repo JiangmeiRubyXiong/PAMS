@@ -35,11 +35,12 @@ function(cde.obj, Ytest){
 #' @param xden_param The argument `xden` for function `hdrcde::cde.bandwidths`
 #' @param xmar Number of bins for conditional density estimation
 #' @param ymar Number of bins for conditional density estimation
+#' @param plot whether to generate the cde plot. Default is FALSE
 #' @importFrom hdrcde cde cde.bandwidths
 #' @import dplyr
 #' @export
 
-fit_cde <- function(Yhat, resid, method_param=2, xden_param="uniform", xmar=50, ymar=100){
+fit_cde <- function(Yhat, resid, method_param=2, xden_param="uniform", xmar=50, ymar=100, plot="FALSE"){
   # calculate a,b
   ab <- cde.bandwidths(
     x = Yhat, y = resid, method=method_param, xden=xden_param
@@ -54,5 +55,6 @@ fit_cde <- function(Yhat, resid, method_param=2, xden_param="uniform", xmar=50, 
     a=a,
     b=b
   )
+  if(plot){plot(fit_cde)}
   return(fit_cde)
 }

@@ -8,6 +8,9 @@
 #' @param n.mi (optional) Number of multiple imputations. Default to be 10.
 #' @param x.mar (optional) Number of bins for conditional density estimation. Default to be 50.
 #' @param y.mar (optional) umber of bins for conditional density estimation. Default to be 1000.
+#' @param plot whether to generate the cde plot. Default is FALSE
+#' @param diag.plot whether to generate the diagnostic plot. Default is FALSE
+#' @param path The file name and path to where the disgnostic plot is stored. Default to be "~/diag.pdf"
 #' @importFrom hdrcde cde cde.bandwidths
 #' @importFrom stats rnorm runif
 #' @import dplyr
@@ -33,40 +36,66 @@
 #' @export
 
 imimp <-
-function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), sampleID=NULL, n.mi=10, x.mar=50, y.mar=1000){
-  
-  error_calib <- calibY - calibYhat
-  
-  if(cdeType=="simple"){
-    res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
-    for(i in 1:n.mi){
-      res.mat[,i]<- sample(error_calib, length(yhat), replace = T) + yhat
+  function(yhat, calibYhat, calibY, cdeType = c("simple", "local", "bySample"), 
+           sampleID=NULL, n.mi=10, x.mar=50, y.mar=1000, plot=FALSE, 
+           diag.plot=FALSE, path="~/diag.pdf"){
+    
+    error_calib <- calibY - calibYhat
+    
+    if(cdeType=="simple"){
+      res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
+      for(i in 1:n.mi){
+        res.mat[,i]<- sample(error_calib, length(yhat), replace = T) + yhat
+      }
     }
+    
+    if(cdeType=="local"){
+      cde.obj <- fit_cde(calibYhat, error_calib, xmar = x.mar, ymar = y.mar, plot=plot)
+      res.mat <- sapply(vector("list", length = n.mi), function(x){CDE_sample(cde.obj, yhat) + yhat},
+                        simplify = TRUE)
+    }
+    
+    if(cdeType=="bySample"){
+      if(is.null(sampleID)){sampleID=rep("1", length(yhat))}
+      res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
+      test.slides <- unique(sampleID[[2]])
+      train.slides <- unique(sampleID[[1]])
+      train.calibYhat.list <- split(calibYhat, sampleID[[1]])
+      train.error.list <- split(error_calib, sampleID[[1]])
+      cde.train.list <- mapply(fit_cde, train.calibYhat.list, train.error.list, MoreArgs = list(xmar = x.mar, ymar = y.mar),SIMPLIFY = FALSE)
+      for(i in 1:n.mi){
+        for(test.i in test.slides){
+          index.test.i <- which(sampleID[[2]] == test.i)
+          train.slide.i <- sample(train.slides, 1)
+          res.mat[index.test.i, i]<- CDE_sample(cde.train.list[[train.slide.i]], 
+                                                yhat[index.test.i])+yhat[index.test.i]
+        }
+      }
+    }
+    
+    return(res.mat)
   }
-  
-  if(cdeType=="local"){
-    cde.obj <- fit_cde(calibYhat, error_calib, xmar = x.mar, ymar = y.mar)
-    res.mat <- sapply(vector("list", length = n.mi), function(x){CDE_sample(cde.obj, yhat) + yhat},
-                      simplify = TRUE)
-  }
-  
-  if(cdeType=="bySample"){
-    if(is.null(sampleID)){sampleID=rep("1", length(yhat))}
-    res.mat <- matrix(NA, nrow = length(yhat), ncol=n.mi)
-    test.slides <- unique(sampleID[[2]])
-    train.slides <- unique(sampleID[[1]])
-    train.calibYhat.list <- split(calibYhat, sampleID[[1]])
-    train.error.list <- split(error_calib, sampleID[[1]])
-    cde.train.list <- mapply(fit_cde, train.calibYhat.list, train.error.list, MoreArgs = list(xmar = x.mar, ymar = y.mar),SIMPLIFY = FALSE)
+
+imp.diag.scatter <- function(imimp.obj, yhat, ytrue, SlideID=NULL, path="~/diag.pdf"){
+  # plot a set of figures: yhat v.s. true error; yhat v.s. error sampled, 
+  # AND error sampled for each imputation (?)
+  # if SlideID is not specified, let it be a vector of "1"s
+  if(is.null(SlideID)){SlideID <- rep("1", length(yhat))}
+  slides <- unique(SlideID)
+  pdf(file=path)
+  for(slide.i in slides){
+    par(mfrow=c(3,3))
+    slide.idx <- which(SlideID==slide.i)
+    x <- yhat[slide.idx]
     for(i in 1:n.mi){
-      for(test.i in test.slides){
-        index.test.i <- which(sampleID[[2]] == test.i)
-        train.slide.i <- sample(train.slides, 1)
-        res.mat[index.test.i, i]<- CDE_sample(cde.train.list[[train.slide.i]], 
-                                             yhat[index.test.i])+yhat[index.test.i]
+      y <- (res.mat[,i]-yhat)[slide.idx]
+      if(slide.idx > 100){
+        idx=sample(1:length(x), 100)
+        plot(x[idx],y[idx], xlab="Yhat", ylab="Error Sampled", main=paste(slide.i, i, sep=":Imp"))
+      } else {
+        plot(x,y, xlab="Yhat", ylab="Error Sampled", main=paste(slide.i, i, sep=":Imp"))
       }
     }
   }
-  
-  return(res.mat)
+  dev.off()
 }

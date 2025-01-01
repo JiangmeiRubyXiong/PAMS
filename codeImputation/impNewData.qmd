@@ -1,0 +1,902 @@
+---
+title: "Imputation data"
+author: "Ruby Xiong"
+format: html
+editor: source
+---
+
+```{r}
+library(GammaGateR)
+library(data.table)
+library(gridExtra)
+library(ggpubr)
+library(car)
+library(RESI)
+library(emmeans)
+library(parallel)
+library(hrbrthemes)
+library(ggplot2)
+library(fossil)
+library(dplyr)
+library(nlme)
+library(glmnet)
+library(modelr)
+library(xgboost)
+library(dplyr)
+library(caret)
+library(hdrcde)
+library(reshape2)
+```
+
+## Load and normalize expressions
+
+Dataset: https://data.mendeley.com/datasets/mpjzbtfgfr/1
+
+```{r loadData}
+dataSchurch<- read.csv(file='/media/disk2/atlas_mxif/data/CRC_clusters_neighborhoods_markers.csv', header = TRUE)
+originalNames <- names(dataSchurch)
+markers <- originalNames[grep("\\.\\.\\.", originalNames)] |>
+          strsplit("\\.\\.\\.") |> lapply("[[",1) |> unlist()
+marker_datanames <- originalNames[grep("\\.\\.\\.", originalNames)]
+
+```
+
+Paper (https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3440263) mentions that + "profiling of 140 tissue regions from 35 advanced-stage colorectal cancer (CRC) patients with 56 protein markers simultaneously" + "we selected cohorts of 17 CLR and 18 DII patients"
+
+```{r}
+length(markers)
+length(unique((dataSchurch$File.Name)))#region
+length(unique((dataSchurch$patients)))#patient
+ifelse(table(dataSchurch$groups, dataSchurch$patients)[1,], 1, 0) # CLR patients - 1, DII patients - 2
+# data size
+hist(table(dataSchurch$File.Name))
+hist(table(dataSchurch$patient))
+table(dataSchurch$patients, dataSchurch$File.Name) # each patient has several regions
+# what is TMA_AB?? it looks like some sort of characteristic of a specific region, but within patient can have different ABs
+table(dataSchurch$TMA_AB, dataSchurch$File.Name)
+```
+
+### Normalize Cell Expression
+
+```{r}
+allMarkers = markers
+nzNormedMarkers = paste0('nzNorm_',allMarkers)
+dataSchurch = do.call(rbind, lapply(split(dataSchurch, dataSchurch$TMA_AB), function(df){df[,nzNormedMarkers] = log10(1+sweep(df[,marker_datanames], 2, colMeans(replace(df[,marker_datanames], df[,marker_datanames]==0, NA), na.rm = TRUE ), FUN = '/' ) ); df }) )
+slides <- unique(dataSchurch$patients)
+```
+
+# simple plot check up
+
+```{r}
+par(pty="s")
+plot(dataSchurch$X_withinTile.X_withinTile[dataSchurch$File.Name=="reg001_A"],
+            dataSchurch$Y_withinTile.Y_withinTile[dataSchurch$File.Name=="reg001_A"],pch=16, cex=0.5)
+```
+
+
+```{r}
+names(dataSchurch)
+```
+
+# Fold Split
+
+```{r}
+# 18 training slides, 17 testing slides # even split
+CLR_patients <- slides[table(dataSchurch$patients, dataSchurch$groups)[,1]>0]
+DII_patients <- slides[table(dataSchurch$patients, dataSchurch$groups)[,2]>0]
+set.seed(1)
+## training 
+trainPatients <- c(CLR_patients[sample(1:17, 12)], DII_patients[sample(1:18, 12)])
+## testing
+testPatients <-  setdiff(slides, trainPatients)
+## slide - patient correspondence
+SlidePatient <- dataSchurch %>% group_by(patients, File.Name) %>% reframe()
+## training slides
+trainSlide <- SlidePatient$File.Name[which(SlidePatient$patients %in% trainPatients)]
+testSlide <- SlidePatient$File.Name[which(SlidePatient$patients %in% testPatients)]
+
+```
+
+# functions for analysis
+
+Testing out with CD20
+
+```{r function_createFoldData}
+marker="CD20"
+createFoldData <- function(dat=dataSchurch, slideTrain=slideTrain, marker="MUC5AC"){
+  # normalized expression name in the dataset
+  nzmarkername <- paste("nzNorm", marker, sep="_")
+  #define predictor and response variables in testing set. Use the common markers for all 3 batches as the prediction variables
+  commons_regress <- nzNormedMarkers[nzNormedMarkers!=nzmarkername]
+  HTA_train1 <- as.matrix(dat[dat$File.Name%in%slideTrain,commons_regress])
+  # Need to code tissue type and tumor (binary) as discrete numbers to run XGBoost
+  HTA_train2 <- cbind(HTA_train1, dat[dat$File.Name%in%slideTrain,"groups"])
+  HTA_train_marker <- dat[dat$File.Name%in%slideTrain, nzmarkername]
+  return(list(HTA_train1, HTA_train2, HTA_train_marker, dat_original = dat[dat$File.Name%in%slideTrain, ]))
+}
+```
+
+```{r function_imputation}
+imputation <- function(marker="CD20", trainSlides=trainSlide, testSlides=testSlide, 
+                       dataset=dataSchurch, n.imp=10){
+  trainData <- createFoldData(dat=dataset, 
+                              slideTrain = trainSlides, 
+                              marker = marker)
+  cv_model2 <- glmnet:::cv.glmnet(trainData[[2]], trainData[[3]], alpha = 1, nfolds = 5)
+  # find optimal lambda value that minimizes test MSE
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(trainData[[2]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+  testData <- createFoldData(dat=dataset, 
+                            slideTrain = testSlides, 
+                            marker = marker)
+  Yhat.test <- as.numeric(
+    predict(best_model2,newx=testData[[2]],s= best_lambda2))
+  
+  # slide-specific calibration
+  calibY <- c()
+  calibYhat <- c()
+  calibSlides <- c()
+  for(i in trainSlides){
+    trainslidei <- setdiff(trainSlides,i)
+    trainDatai <- createFoldData(dat=dataset, 
+                                slideTrain = trainslidei, 
+                                marker = marker)
+    
+    # model with tumor info
+    cv_model2 <- glmnet:::cv.glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, nfolds = 5)
+    # find optimal lambda value that minimizes test MSE
+    best_lambda2 <- cv_model2$lambda.min
+    best_model2 <- glmnet::glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, lambda = best_lambda2)
+    caliData <- createFoldData(dat=dataset, 
+                               slideTrain = i, 
+                               marker = marker)
+    Yhat <- as.numeric(
+      predict(best_model2,newx=caliData[[2]],s= best_lambda2))
+    
+    calibY <- c(calibY, caliData[[3]])
+    calibYhat <- c(calibYhat, Yhat)
+    calibSlides <- c(calibSlides, rep(i, length(Yhat)))
+  }
+  
+  ################################
+  ########## Use imimp ###########
+  ################################
+  
+  imp.simple <- imimp(Yhat.test, calibYhat , calibY, cdeType = "simple", x.mar = 50, y.mar=100, n.mi=n.imp)
+  imp.local<- imimp(Yhat.test, calibYhat, calibY, cdeType = "local", n.mi=n.imp)
+  
+  SlideGroup <- dataSchurch %>% group_by(File.Name, groups) %>% reframe()
+  calibSlides_CLR <- which(calibSlides %in% (unlist(subset(SlideGroup, groups==1, File.Name))))
+  calibSlides_DII <- which(calibSlides %in% (unlist(subset(SlideGroup, groups==2, File.Name))))
+  
+  testSlidesAll <- dataSchurch$File.Name[dataSchurch$patients %in% testPatients]
+  testSlides_CLR <- which(testSlidesAll %in% (unlist(subset(SlideGroup, groups==1, File.Name))))
+  testSlides_DII <- which(testSlidesAll %in% (unlist(subset(SlideGroup, groups==2, File.Name))))
+  
+  imp.bySample <- matrix(NA, nrow=length(testSlidesAll), ncol=n.imp)
+
+  imp.bySample[testSlides_CLR,] <- imimp(Yhat.test[testSlides_CLR], calibYhat[calibSlides_CLR],
+                    calibY[calibSlides_CLR], cdeType = "bySample",
+                    x.mar = 50, y.mar=100, 
+                    sampleID=list(calibSlides[calibSlides_CLR], testSlidesAll[testSlides_CLR]), n.mi=n.imp)
+  
+  imp.bySample[testSlides_DII,] <-imimp(Yhat.test[testSlides_DII], calibYhat[calibSlides_DII],
+                    calibY[calibSlides_DII], cdeType = "bySample",
+                    x.mar = 50, y.mar=100, 
+                    sampleID=list(calibSlides[calibSlides_DII], testSlidesAll[testSlides_DII]), n.mi=n.imp)
+
+  
+  imp.list <- list(Yhat, imp.simple, imp.local, imp.bysample)
+  save(imp.list, file=paste0("~/ImageImputation/",paste(substitute(dataset)),"fit", marker, ".RData"))
+
+}
+```
+
+# plot: imputation quantile v.s. real quantile
+
+```{r function_summary_quantile}
+
+# library(tidyverse)
+# library(tidyr)
+# library(tibble)
+library(reshape2)
+# detach(package:plyr)
+single_data_process <- function(input.data){
+    names(data.subset.test) <- c("value", "slides", "groups")
+    real.quantiles.test <- data.subset.test %>% 
+      group_by(slides) %>%  
+      reframe(groups=first(groups),
+              quantile = scales::percent(c(0.9, 0.95, 0.99)),
+              real_value = quantile(value, c(0.9, 0.95, 0.99)))
+    return(real.quantiles.test)
+}
+
+
+
+summary_quantile <- function(imp.result=imp.list.strat, marker=marker, dataset=dataSchurch, testSlides=testSlides){
+  yhat.test <- imp.result[[1]]
+  imp.result=imp.result[2:4]
+  slides.vec <- dataset$File.Name[dataset$File.Name %in% testSlides]
+  quantile.list.strat <- lapply(imp.result, function(imp.mat){
+    imp.df <- data.frame(imp.mat, slides=slides.vec)
+    imp.df$groups <- dataset$groups[which(dataset$File.Name %in% testSlides)]
+    imp.vec <- melt(as.data.table(imp.df), id.vars = c("slides","groups"), variable.name = "im")
+    quantile.df <- as.data.frame(imp.vec %>%
+                    group_by(slides, im, groups) %>%
+                    reframe(quantile = scales::percent(c(0.9, 0.95, 0.99)),
+                    value = quantile(value, c(0.9, 0.95, 0.99))))
+    return(quantile.df)
+  })
+  quantile.list.df.strat <- do.call(rbind, quantile.list.strat )
+  quantile.list.df.strat$methods <- rep(c("simple", "local", "bySample"), each=(nrow(quantile.list.df.strat)/3))
+  quantile.imp.summary.strat  <- as.data.frame(quantile.list.df.strat  %>% group_by(quantile, im, groups, methods) %>% reframe(means=mean(value)))
+  # test data true
+  real.quantiles.test <- single_data_process(dataset[which(dataset$File.Name %in% testSlide),c(paste0("nzNorm_", marker), "File.Name", "groups")])
+  # training data true
+  real.quantiles.train <- single_data_process(dataset[which(!(dataset$File.Name %in% testSlide)),c(paste0("nzNorm_", marker), "File.Name", "groups")])
+  # yhat
+  quantiles.yhat <- single_data_process(data.frame(yhat.test, dataset[which(dataset$File.Name %in% testSlide),c("File.Name", "groups")]))
+  
+  ll <- list(quantile.list.df.strat, real.quantiles.test, real.quantiles.train, quantiles.yhat)
+
+save(ll, file = paste0("~/ImageImputation/plots/dataSchurch", marker,"quantileIMP.RData"))
+}
+```
+
+TARGET PARAMETER: MEAN QUANTILE (v.s. example mean difference)
+
+```{r function_descriptive_quantiles}
+marker="CD20"
+n.imp <- 10
+
+var.calc <- function(qunatiledf){
+  # within imputation: formula 9.2
+  n.slides <- unique(qunatiledf$slides)
+  within.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::summarize(SEi = se.sq(value), .groups = "keep"))
+  within.var.pool <- as.data.frame(within.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARW = mean(SEi), .groups = "keep"))
+  # between imputation: formula 9.3
+  between.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::reframe(meanImp = mean(value), .groups = "keep"))
+  between.var.pool <- as.data.frame(between.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARB = var(meanImp), means=mean(meanImp), .groups = "keep"))
+  # pool variance: formula 9.4
+  library(dplyr)
+  all.vars <- left_join(within.var.pool, between.var.pool, by=c("methods", "quantile"))
+  all.vars$VARB <- all.vars$VARB
+  all.vars$vars <- all.vars$VARW+all.vars$VARB*((n.imp+1)/n.imp)
+  # calculate df
+  source("~/ImageImputation/dfCalc.R")
+  all.vars.df <- dfCalc(all.vars$VARB, all.vars$vars, n.imp ,length(testSlides), 1)
+  all.vars$tval95 <- qt(0.975, all.vars.df)
+  return(all.vars)
+}
+
+se.sq <- function(a){sd(a)^2/length((a))}
+
+descriptive_quantiles <- function(result.list, n.testSlide=44, n.trainslide=96){
+  impQuantile <- result.list[[1]]
+  trueQuantiletest <- result.list[[2]]
+  trueQuantiletrain <- result.list[[3]]
+  QuantileYhat <- result.list[[4]]
+
+  all.vars.strat <- var.calc(qunatiledf=impQuantile)
+  # real quantile mean and variance
+  true.plot.test <- trueQuantiletest %>% group_by(quantile)%>%dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="true_test") %>% as.data.frame()
+  true.plot$tval95 <- qt(0.975, (length(n.testSlide)-1))
+  
+  true.plot.train <- trueQuantiletrain %>% group_by(quantile)%>%dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="true_train") %>% as.data.frame()
+  true.plot$tval95 <- qt(0.975, (length(n.trainSlide)-1))
+  
+  yhatPlot <- QuantileYhat %>% group_by(quantile)%>%dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="yhat") %>% as.data.frame()
+  yhatPlot$tval95 <- qt(0.975, (length(n.testSlide)-1))
+
+  df.plot.strat <- rbind(true.plot.train, true.plot.test, yhatPlot, all.vars.strat[,c("methods", "quantile", "means", "vars", "tval95")])
+  df.plot.strat$sd <- sqrt(df.plot$vars)
+
+  p = ggplot() +
+    geom_errorbar(data=df.plot,aes(xmin=means-tval95*sd, xmax=means+tval95*sd, y=methods), width=.2)+
+    geom_point(data=df.plot,aes(x=means, y=methods))+facet_wrap(~quantile, scales = "free_x") +
+    ggtitle(marker)+theme_bw()
+  ggsave(p, file=paste0("~/ImageImputation/figure/RubinPool", marker, ".png"), width=9.85, height=7.79, dpi=300)
+
+  # plot mean and pooled var by group
+all.vars.CLR.strat <- cbind(var.calc(qunatiledf=subset(quantile.list.df.strat, groups==1)),groups=1)
+all.vars.DII.strat <- cbind(var.calc(qunatiledf=subset(quantile.list.df.strat, groups==2)),groups=2)
+true.plot.bygroup <- trueQuantile %>%
+  group_by(quantile, groups)%>%
+  dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="true") %>%
+  as.data.frame()
+true.plot.bygroup$tval95 <- qt(0.975, (length(testSlides)-1))
+
+df.plot.bygroup <- 
+  rbind(true.plot.bygroup[,c("methods", "quantile", "means", "vars", "tval95", "groups")], 
+  all.vars.CLR.strat[,c("methods", "quantile", "means", "vars", "tval95", "groups")],
+  all.vars.DII.strat[,c("methods", "quantile", "means", "vars", "tval95","groups")])
+
+df.plot.bygroup$sd <- sqrt(df.plot.bygroup$vars)
+df.plot.bygroup$groups <- factor(df.plot.bygroup$groups, label=c("CLR", "DII"))
+p = ggplot() +
+  geom_errorbar(data=df.plot.bygroup,aes(xmin=means-tval95*sd, xmax=means+tval95*sd, y=methods, color=groups), width=.2)+
+  geom_point(data=df.plot.bygroup,aes(x=means, y=methods, color=groups))+facet_wrap(~quantile, scales = "free_x") +
+  ggtitle(marker)+theme_bw()
+
+  ggsave(p, file=paste0("~/ImageImputation/figure/RubinPoolbygroup", marker, ".png"), width=9.85, height=7.79, dpi=300)
+  
+## variance bar plot
+var.plot.strat <- reshape2::melt(all.vars.strat[,c(1,2,3,4,6)], id.vars=c("methods", "quantile"))
+# add true data varW
+var.plot.strat <- rbind(var.plot.strat, 
+                  data.frame(methods="true", quantile=var.plot.strat$quantile,
+                                       variable="VARW", value=true.plot$vars),
+                  data.frame(methods="true", quantile=var.plot.strat$quantile,
+                                       variable="vars", value=true.plot$vars))
+
+# diff.plot$type <- ifelse(diff.plot$variable=="vars", "total", "separate")
+p <- ggplot(var.plot.strat, aes(fill=variable, y=value, x=methods)) + 
+    geom_bar(position="dodge", stat="identity")+
+  facet_grid(rows=vars(variable),
+             cols=vars(quantile), scales = "free") +theme_ipsum()+scale_x_discrete(guide = guide_axis(angle = 45))
+
+  ggsave(p, file=paste0("~/ImageImputation/figure/RubinPoolVarBarPlot", marker, ".png"), width=9.85, height=7.79, dpi=300)
+}
+```
+
+GEE difference stratified
+
+```{r function gee_plot}
+library(gee)
+library(geepack)
+
+gee_plot <- function(result.list, SlidePatient=SlidePatient){
+  quantile.list.df.strat <- result.list[[1]]
+  trueQuantiletest <- result.list[[2]]
+  trueQuantiletrain <- result.list[[3]]
+
+  quantile3 <- unique(quantile.list.df.strat$quantile)
+
+# imputation mean
+  impMeans <- as.data.frame(quantile.list.df.strat %>% group_by(quantile, slides, methods) %>% reframe(means=mean(value)))
+  SlidePatientGroup <- dataSchurch %>% group_by(patients, File.Name, groups) %>% reframe()
+impMeans <- left_join(impMeans, SlidePatientGroup, by=join_by(slides==File.Name))
+
+  trueQuantiltest <- left_join(trueQuantiletest, SlidePatient, by=join_by(slides==File.Name))
+  trueQuantiltrain <- left_join(trueQuantiletrain, SlidePatient, by=join_by(slides==File.Name))
+
+  df.plot.geemean <- data.frame(quantile=rep(c("90%", "95%", "99%"), 5),
+                      means=NA, sd=NA, stats=NA,
+                      methods=rep(c("test", "train","mean","simple" , "local" , "bySample"), each=3))
+
+
+# pool parameter estimates with Rubin's:
+# mean: mean parameter estimate
+# VarB: the variance of parameter estimate mean, of each imputation
+# VarW: the mean of parameter estimate variance, of each imputation
+quantile.list.df.strat <- left_join(quantile.list.df.strat, SlidePatient, by=join_by(slides==File.Name))
+for(i in quantile3){
+  for(singleData.i in 2:4){
+    singleData <- result.list[[singleData.i]]
+    method <- c("test", "train","mean")[(singleData.i-1)]
+    singleData <- left_join(singleData, SlidePatient, by=join_by(slides==File.Name))
+    m0 <- gee(real_value ~ 1, id=patients, family='gaussian',
+            corstr = "exchangeable", data=subset(trueQuantile, quantile==i))
+    idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods==method
+    df.plot.geemean$means[idx] <- m0$coefficients
+    df.plot.geemean$sd[idx] <- sqrt(m0$robust.variance)
+    df.plot.geemean$stats[idx] = qnorm(0.975)
+  }
+  
+  for(m in c("simple", "local", "bySample")){
+    n.imp <- length(levels(quantile.list.df.strat$im))
+    m0.param <- data.frame(mean=rep(NA, n.imp), SE=rep(NA, n.imp))
+    for(ii in 1:n.imp){
+      m0 <- gee(value ~ 1, id=patients, family='gaussian', corstr = "exchangeable", 
+            data=subset(quantile.list.df.strat, (quantile==i&methods==m&im==paste0("X",ii))))
+      m0.param[ii,"mean"] <- m0$coefficients
+      m0.param[ii,"SE"] <- summary(m0)$coefficients[4]
+    }
+  idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods==m
+  df.plot.geemean$means[idx] <- mean(m0.param$mean)
+  VARB <- var(m0.param$mean)
+  vars <- sqrt(var(m0.param$mean)*(n.imp+1)/n.imp+mean((m0.param$SE)^2))
+  df.plot.geediff$sd[idx] <- vars
+  df.plot.geediff$stats[idx] <- qt(0.975, dfCalc(VARB, vars, 10 , 44, 2))
+  }
+}
+
+p = ggplot() +
+  geom_errorbar(data=df.plot.geemean,aes(xmin=means-stats*sd, xmax=means+stats*sd, y=methods), width=.2)+
+  geom_point(data=df.plot.geemean,aes(x=means, y=methods))+facet_wrap(~quantile, scales = "free_x") +
+  ggtitle(paste0(marker, ": GEE Means"))+theme_bw()
+ggsave(p, file=paste0("~/ImageImputation/figure/DataSchurchGEEMean", marker,"_",test.i, ".png"), width=4, height=3.5, dpi=300)
+
+gee.results <- list()
+df.plot.geediff <- df.plot[,c("quantile", "means", "sd","methods")]
+
+for(i in quantile3){
+  
+  for(singleData.i in 2:4){
+    singleData <- result.list[[singleData.i]]
+    method <- c("test", "train","mean")[(singleData.i-1)]
+    singleData <- left_join(singleData, SlidePatient, by=join_by(slides==File.Name))
+    m0 <- gee(real_value ~ groups, id=patients, family='gaussian',
+            corstr = "exchangeable", data=subset(trueQuantile, quantile==i))
+    idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods==method
+    df.plot.geemean$means[idx] <- m0$coefficients[2]
+    df.plot.geemean$sd[idx] <- sqrt(m0$robust.variance)[2,2]
+    df.plot.geemean$stats[idx] = qnorm(0.975)
+  }
+  
+  for(m in c("simple", "local", "bySample")){
+    n.imp <- length(levels(quantile.list.df.strat$im))
+    m0.param <- data.frame(mean=rep(NA, n.imp), SE=rep(NA, n.imp))
+    for(ii in 1:n.imp){
+      m0 <- gee(value ~ groups, id=patients, family='gaussian', corstr = "exchangeable", 
+            data=subset(quantile.list.df.strat, (quantile==i&methods==m&im==paste0("X",ii))))
+      m0.param[ii,"mean"] <- m0$coefficients[2]
+      m0.param[ii,"SE"] <- summary(m0)$coefficients[2,4]
+    }
+    
+  idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods==m
+  df.plot.geediff$means[idx] <- mean(m0.param$mean)
+  VARB <- var(m0.param$mean)
+  vars <- sqrt(var(m0.param$mean)*(n.imp+1)/n.imp+mean((m0.param$SE)^2))
+  df.plot.geediff$sd[idx] <- vars
+  df.plot.geediff$stats[idx] <- qt(0.975, dfCalc(VARB, vars, 10 , 44, 2))
+  }
+}
+
+p = ggplot() +
+  geom_errorbar(data=df.plot.geediff,aes(xmin=means-sd*stats, xmax=means+sd*stats, y=methods), width=.2)+
+  geom_point(data=df.plot.geediff,aes(x=means, y=methods))+facet_wrap(~quantile, scales = "free_x") +
+  ggtitle(paste0(marker, ": GEE Difference"))+theme_bw()
+  ggsave(p, file=paste0("~/ImageImputation/figure/DataSchurchGEEDiff", marker,"_",test.i, ".png"), width=4, height=3.5, dpi=300)
+}
+
+```
+
+# Test Data Check
+
+```{r}
+qq.plot <- list()
+methods=c("simple", "local", "bySample")
+quantiles.list <- list()
+testSlidesAll <- dataSchurch$File.Name[dataSchurch$File.Name %in% testSlides]
+for(test.i in (testSlides[c(1,2, 17,18)])){
+  quantiles.list <- list()
+  idx <- which(testSlidesAll==test.i)
+  for(m in 1:length(imp.list.strat)){
+  method.i <- imp.list.strat[[m]]
+  m.i <- methods[m]
+  quantiles.list[[m]] <- apply(method.i[idx,], 2, function(x){quantile(x, ((1:500)/500))})
+  }
+  quantiles.list <- as.data.frame(do.call(rbind,quantiles.list))
+  quantiles.list$methods <- rep(methods, each=500)
+  quantiles.list$xreal <- quantile(dataSchurch$nzNorm_CD20[dataSchurch$File.Name==test.i], ((1:500)/500))
+  quantiles.df <- reshape2::melt(quantiles.list, id.vars=c("methods", "xreal"))
+  
+  quantiles.df$methods <- factor(quantiles.df$methods)
+  p <- ggplot(data=quantiles.df) +
+       geom_line(aes( x=xreal,y=value, group=interaction(variable, methods), color=methods), alpha=0.5) + geom_abline(intercept=0, slope=1)+theme_ipsum()
+  ggsave(p, file=paste0("~/ImageImputation/figure/DataSchurchQQ", marker,"_",test.i, ".png"), width=4, height=3.5, dpi=300)
+}
+```
+
+
+# loops at different marker
+
+```{r}
+markers <- c("CD20", "CD38", "CD138", "CD4", "CD68", "CD8")
+
+for(marker in markers){
+  trainData <- createFoldData(dat=dataSchurch, 
+                            slideTrain = trainSlides, 
+                            marker = marker)
+cv_model2 <- glmnet:::cv.glmnet(trainData[[2]], trainData[[3]], alpha = 1, nfolds = 5)
+# find optimal lambda value that minimizes test MSE
+best_lambda2 <- cv_model2$lambda.min
+best_model2 <- glmnet::glmnet(trainData[[2]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+testData <- createFoldData(dat=dataSchurch, 
+                          slideTrain = testSlides, 
+                          marker = marker)
+Yhat.test <- as.numeric(
+  predict(best_model2,newx=testData[[2]],s= best_lambda2))
+
+# slide-specific calibration
+calibY <- c()
+calibYhat <- c()
+calibSlides <- c()
+for(i in trainSlides){
+  trainslidei <- setdiff(trainSlides,i)
+  trainDatai <- createFoldData(dat=dataSchurch, 
+                              slideTrain = trainslidei, 
+                              marker = marker)
+  
+  # model with tumor info
+  cv_model2 <- glmnet:::cv.glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, nfolds = 5)
+  # find optimal lambda value that minimizes test MSE
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, lambda = best_lambda2)
+  caliData <- createFoldData(dat=dataSchurch, 
+                             slideTrain = i, 
+                             marker = marker)
+  Yhat <- as.numeric(
+    predict(best_model2,newx=caliData[[2]],s= best_lambda2))
+  
+  calibY <- c(calibY, caliData[[3]])
+  calibYhat <- c(calibYhat, Yhat)
+  calibSlides <- c(calibSlides, rep(i, length(Yhat)))
+}
+
+################################
+########## Use imimp ###########
+################################
+
+imp.simple <- imimp(Yhat.test, calibYhat , calibY, cdeType = "simple", x.mar = 50, y.mar=100)
+imp.local<- imimp(Yhat.test, calibYhat, calibY, cdeType = "local")
+imp.bysample<-imimp(Yhat.test, calibYhat , calibY, cdeType = "bySample",
+                    x.mar = 50, y.mar=100, sampleID=list(as.character(calibSlides), as.character(dataSchurch$File.Name[dataSchurch$patients %in% testPatients])))
+imp.list <- list(imp.simple, imp.local, imp.bysample)
+save(imp.list, file=paste0("~/ImageImputation/Schurchfit", marker, ".RData"))
+
+slides.vec <- dataSchurch$File.Name[dataSchurch$File.Name %in% testSlides]
+# library(tidyverse)
+# library(tidyr)
+# library(tibble)
+library(reshape2)
+# detach(package:plyr)
+quantile.list <- lapply(imp.list, function(imp.mat){
+  imp.df <- data.frame(imp.mat, slides=slides.vec)
+  imp.df$groups <- dataSchurch$groups[which(dataSchurch$File.Name %in% testSlides)]
+  imp.vec <- melt(as.data.table(imp.df), id.vars = c("slides","groups"), variable.name = "im")
+  quantile.df <- as.data.frame(imp.vec %>%
+                  group_by(slides, im, groups) %>%
+                  reframe(quantile = scales::percent(c(0.9, 0.95, 0.99)),
+                  value = quantile(value, c(0.9, 0.95, 0.99))))
+  return(quantile.df)
+})
+quantile.list.df <- do.call(rbind, quantile.list)
+quantile.list.df$methods <- rep(c("simple", "local", "bySample"), each=(nrow(quantile.list.df)/3))
+quantile.imp.summary <- as.data.frame(quantile.list.df %>% group_by(quantile, im, groups, methods) %>% reframe(means=mean(value))
+)
+data.subset <- dataSchurch[which(dataSchurch$File.Name %in% testSlides),c(paste0("nzNorm_", marker), "File.Name", "groups")]
+names(data.subset) <- c("value", "slides", "groups")
+real.quantiles <- data.subset %>% 
+  group_by(slides) %>%  
+  reframe(groups=first(groups),
+            quantile = scales::percent(c(0.9, 0.95, 0.99)),
+            real_value = quantile(value, c(0.9, 0.95, 0.99)))
+real.quantiles.summary <- as.data.frame(real.quantiles %>% group_by(quantile,groups) %>% summarise(means=mean(real_value), .groups = "keep")
+)
+ll <- list(quantile.list.df, real.quantiles)
+
+save(ll, file = paste0("~/ImageImputation/plots/dataSchurch", marker,"quantileIMP.RData"))
+print(marker)
+}
+
+plot.df.list <- list()
+for(marker in markers){
+  load(paste0("~/ImageImputation/plots/dataSchurch", marker,"quantileIMP.RData"))
+  n.imp <- 10
+  impQuantile <- ll[[1]]
+  trueQuantile <- ll[[2]]
+  se.sq <- function(a){sd(a)^2/length((a))}
+    
+  var.calc <- function(qunatiledf){
+    # within imputation: formula 9.2
+    n.slides <- unique(qunatiledf$slides)
+    within.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::summarize(SEi = se.sq(value), .groups = "keep"))
+    within.var.pool <- as.data.frame(within.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARW = mean(SEi), .groups = "keep"))
+    # between imputation: formula 9.3
+    between.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::reframe(meanImp = mean(value), .groups = "keep"))
+    between.var.pool <- as.data.frame(between.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARB = var(meanImp), means=mean(meanImp), .groups = "keep"))
+    # pool variance: formula 9.4
+    library(dplyr)
+    all.vars <- left_join(within.var.pool, between.var.pool, by=c("methods", "quantile"))
+    all.vars$VARB <- all.vars$VARB
+    all.vars$vars <- all.vars$VARW+all.vars$VARB*((n.imp+1)/n.imp)
+    # calculate df
+    source("~/ImageImputation/dfCalc.R")
+    all.vars.df <- dfCalc(all.vars$VARB, all.vars$vars, n.imp ,length(testSlides), 1)
+    all.vars$tval95 <- qt(0.975, all.vars.df)
+    return(all.vars)
+  }
+  all.vars <- var.calc(qunatiledf=impQuantile)
+  # real quantile mean and variance
+  true.plot <- trueQuantile %>% group_by(quantile)%>%dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="true") %>% as.data.frame()
+  true.plot$tval95 <- qt(0.975, (length(testSlides)-1))
+  
+  df.plot <- rbind(true.plot, all.vars[,c("methods", "quantile", "means", "vars", "tval95")])
+  df.plot$sd <- sqrt(df.plot$vars)
+  df.plot$marker <- marker
+  plot.df.list[[marker]] <- df.plot
+}
+plot.markerAll.df <- do.call(rbind, plot.df.list) %>% as.data.frame()
+plot.markerAll.df$methods <- factor(plot.markerAll.df$methods , levels = c("true", "simple", "local", "bySample"))
+
+```
+
+```{r fig.align="center", echo = FALSE,fig.height = 10, fig.width=7}
+ggplot() +
+  geom_errorbar(data=plot.markerAll.df,aes(ymin=means-tval95*sd, ymax=means+tval95*sd, x=marker, group=methods), position=position_dodge(width=0.4),width=.15)+
+  geom_point(data=plot.markerAll.df,aes(y=means, x=marker, shape=methods), position=position_dodge(width=0.4))+facet_wrap(~quantile, scales = "free_x", ncol=3) +
+  ggtitle("Imputation Quantiles")+theme_bw()+coord_flip()
+ggsave(p, file=paste0("~/ImageImputation/figure/RubinPoolAllmarker.png"), width=9.85, height=7.79, dpi=300)
+```
+
+# loops at different marker, stratified
+
+```{r}
+markers <- c("CD20", "CD38", "CD138", "CD4", "CD68", "CD8")
+
+for(marker in markers){
+  trainData <- createFoldData(dat=dataSchurch, 
+                            slideTrain = trainSlides, 
+                            marker = marker)
+cv_model2 <- glmnet:::cv.glmnet(trainData[[2]], trainData[[3]], alpha = 1, nfolds = 5)
+# find optimal lambda value that minimizes test MSE
+best_lambda2 <- cv_model2$lambda.min
+best_model2 <- glmnet::glmnet(trainData[[2]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+testData <- createFoldData(dat=dataSchurch, 
+                          slideTrain = testSlides, 
+                          marker = marker)
+Yhat.test <- as.numeric(
+  predict(best_model2,newx=testData[[2]],s= best_lambda2))
+
+# slide-specific calibration
+calibY <- c()
+calibYhat <- c()
+calibSlides <- c()
+for(i in trainSlides){
+  trainslidei <- setdiff(trainSlides,i)
+  trainDatai <- createFoldData(dat=dataSchurch, 
+                              slideTrain = trainslidei, 
+                              marker = marker)
+  
+  # model with tumor info
+  cv_model2 <- glmnet:::cv.glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, nfolds = 5)
+  # find optimal lambda value that minimizes test MSE
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(trainDatai[[2]], trainDatai[[3]], alpha = 1, lambda = best_lambda2)
+  caliData <- createFoldData(dat=dataSchurch, 
+                             slideTrain = i, 
+                             marker = marker)
+  Yhat <- as.numeric(
+    predict(best_model2,newx=caliData[[2]],s= best_lambda2))
+  
+  calibY <- c(calibY, caliData[[3]])
+  calibYhat <- c(calibYhat, Yhat)
+  calibSlides <- c(calibSlides, rep(i, length(Yhat)))
+}
+
+################################
+########## Use imimp ###########
+################################
+
+
+SlideGroup <- dataSchurch %>% group_by(File.Name, groups) %>% reframe()
+calibSlides_CLR <- which(calibSlides %in% (unlist(subset(SlideGroup, groups==1, File.Name))))
+calibSlides_DII <- which(calibSlides %in% (unlist(subset(SlideGroup, groups==2, File.Name))))
+
+testSlidesAll <- dataSchurch$File.Name[dataSchurch$patients %in% testPatients]
+testSlides_CLR <- which(testSlidesAll %in% (unlist(subset(SlideGroup, groups==1, File.Name))))
+testSlides_DII <- which(testSlidesAll %in% (unlist(subset(SlideGroup, groups==2, File.Name))))
+
+imp.bysample.CLR <-imimp(Yhat.test[testSlides_CLR], calibYhat[calibSlides_CLR],
+                    calibY[calibSlides_CLR], cdeType = "bySample",
+                    x.mar = 50, y.mar=100, 
+                    sampleID=list(calibSlides[calibSlides_CLR], testSlidesAll[testSlides_CLR]))
+
+imp.simple <- imimp(Yhat.test, calibYhat,
+                    calibY, cdeType = "simple", x.mar = 50, y.mar=100)
+imp.local<- imimp(Yhat.test, calibYhat,
+                  calibY, cdeType = "local")
+imp.bysample.DII<-imimp(Yhat.test[testSlides_DII], calibYhat[calibSlides_DII],
+                    calibY[calibSlides_DII], cdeType = "bySample",
+                    x.mar = 50, y.mar=100, 
+                    sampleID=list(calibSlides[calibSlides_DII], testSlidesAll[testSlides_DII]))
+# combine
+imp.bySample <- matrix(NA, nrow=length(testSlidesAll), ncol=10)
+
+imp.bySample[testSlides_CLR,] <- imp.list_CLR[[3]];imp.bySample[testSlides_DII,] <- imp.list_DII[[3]]
+imp.list.strat <- list(Yhat.test, imp.simple, imp.local, imp.bySample)
+
+save(imp.list.strat, file=paste0("~/ImageImputation/SchurchfitStrat", marker, ".RData"))
+
+slides.vec <- dataSchurch$File.Name[dataSchurch$File.Name %in% testSlides]
+# library(tidyverse)
+# library(tidyr)
+# library(tibble)
+library(reshape2)
+# detach(package:plyr)
+yhat.test <- imp.list.strat[[1]]
+imp.list.strat <- imp.list.strat[2:4]
+quantile.list <- lapply(imp.list.strat, function(imp.mat){
+  imp.df <- data.frame(imp.mat, slides=slides.vec)
+  imp.df$groups <- dataSchurch$groups[which(dataSchurch$File.Name %in% testSlides)]
+  imp.vec <- melt(as.data.table(imp.df), id.vars = c("slides","groups"), variable.name = "im")
+  quantile.df <- as.data.frame(imp.vec %>%
+                  group_by(slides, im, groups) %>%
+                  reframe(quantile = scales::percent(c(0.9, 0.95, 0.99)),
+                  value = quantile(value, c(0.9, 0.95, 0.99))))
+  return(quantile.df)
+})
+quantile.list.df <- do.call(rbind, quantile.list)
+quantile.list.df$methods <- rep(c("simple", "local", "bySample"), each=(nrow(quantile.list.df)/3))
+quantile.imp.summary <- as.data.frame(quantile.list.df %>% group_by(quantile, im, groups, methods) %>% reframe(means=mean(value))
+)
+data.subset <- dataSchurch[which(dataSchurch$File.Name %in% testSlides),c(paste0("nzNorm_", marker), "File.Name", "groups")]
+names(data.subset) <- c("value", "slides", "groups")
+real.quantiles <- data.subset %>% 
+  group_by(slides) %>%  
+  reframe(groups=first(groups),
+            quantile = scales::percent(c(0.9, 0.95, 0.99)),
+            real_value = quantile(value, c(0.9, 0.95, 0.99)))
+real.quantiles.summary <- as.data.frame(real.quantiles %>% group_by(quantile,groups) %>% summarise(means=mean(real_value), .groups = "keep")
+)
+
+yhat.subset <- data.subset
+yhat.subset$value <- yhat.test
+yhat.quantiles <- yhat.subset %>% 
+  group_by(slides) %>%  
+  reframe(groups=first(groups),
+            quantile = scales::percent(c(0.9, 0.95, 0.99)),
+            real_value = quantile(value, c(0.9, 0.95, 0.99)))
+
+ll <- list(quantile.list.df, real.quantiles, yhat.quantiles)
+
+save(ll, file = paste0("~/ImageImputation/plots/dataSchurchStrat", marker,"quantileIMP.RData"))
+print(marker)
+}
+
+plot.df.list <- list()
+for(marker in markers){
+  load(paste0("~/ImageImputation/plots/dataSchurchStrat", marker,"quantileIMP.RData"))
+  n.imp <- 10
+  impQuantile <- ll[[1]]
+  trueQuantile <- ll[[2]]
+  se.sq <- function(a){sd(a)^2/length((a))}
+    
+  var.calc <- function(qunatiledf){
+    # within imputation: formula 9.2
+    n.slides <- unique(qunatiledf$slides)
+    within.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::summarize(SEi = se.sq(value), .groups = "keep"))
+    within.var.pool <- as.data.frame(within.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARW = mean(SEi), .groups = "keep"))
+    # between imputation: formula 9.3
+    between.var <- as.data.frame(qunatiledf %>% group_by(methods, quantile, im)%>%dplyr::reframe(meanImp = mean(value), .groups = "keep"))
+    between.var.pool <- as.data.frame(between.var%>%group_by(methods, quantile)%>%dplyr::summarize(VARB = var(meanImp), means=mean(meanImp), .groups = "keep"))
+    # pool variance: formula 9.4
+    library(dplyr)
+    all.vars <- left_join(within.var.pool, between.var.pool, by=c("methods", "quantile"))
+    all.vars$VARB <- all.vars$VARB
+    all.vars$vars <- all.vars$VARW+all.vars$VARB*((n.imp+1)/n.imp)
+    # calculate df
+    source("~/ImageImputation/dfCalc.R")
+    all.vars.df <- dfCalc(all.vars$VARB, all.vars$vars, n.imp ,length(testSlides), 1)
+    all.vars$tval95 <- qt(0.975, all.vars.df)
+    return(all.vars)
+  }
+  all.vars <- var.calc(qunatiledf=impQuantile)
+  # real quantile mean and variance
+  true.plot <- trueQuantile %>% group_by(quantile)%>%dplyr::summarise(means=mean(real_value), vars=se.sq(real_value), methods="true") %>% as.data.frame()
+  true.plot$tval95 <- qt(0.975, (length(testSlides)-1))
+  
+  df.plot <- rbind(true.plot, all.vars[,c("methods", "quantile", "means", "vars", "tval95")])
+  df.plot$sd <- sqrt(df.plot$vars)
+  df.plot$marker <- marker
+  plot.df.list[[marker]] <- df.plot
+}
+plot.markerAll.df <- do.call(rbind, plot.df.list) %>% as.data.frame()
+plot.markerAll.df$methods <- factor(plot.markerAll.df$methods , levels = c("true", "simple", "local", "bySample"))
+save(plot.markerAll.df, file="StratAllMarker.RData")
+```
+
+```{r fig.align="center", echo = FALSE,fig.height = 10, fig.width=7}
+library(paletteer)
+p <- ggplot() +
+  geom_errorbar(data=plot.markerAll.df,aes(ymin=means-tval95*sd, ymax=means+tval95*sd, x=methods, color=methods), position=position_dodge(width=0.4),width=.15)+
+  geom_point(data=plot.markerAll.df,aes(y=means, x=methods, color=methods), position=position_dodge(width=0.4))+
+  facet_grid(marker~quantile, scales = "free")  +scale_x_discrete(guide = guide_axis(angle = 90))+
+  ggtitle("Imputation Quantiles")+theme_ipsum(axis_text_size = 9)+
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) + scale_color_paletteer_d("nationalparkcolors::BryceCanyon")
+
+
+ggsave(p, file=paste0("~/ImageImputation/figure/RubinPoolAllmarker.png"), width=6, height=8, dpi=300)
+```
+
+
+```{r}
+quantile3 <- unique(quantile.list.df.strat$quantile)
+source("~/ImageImputation/dfCalc.R")
+
+library(gee)
+library(geepack)
+gee.diff.result <- list()
+for (marker in markers){
+  load(paste0("~/ImageImputation/plots/dataSchurchStrat", marker,"quantileIMP.RData"))
+  n.imp <- 10
+  quantile.list.df.strat <- ll[[1]]
+  trueQuantile <- ll[[2]]
+  yhatQuantile <- ll[[3]]
+# imputation mean
+impMeans <- as.data.frame(quantile.list.df.strat %>% group_by(quantile, slides, methods) %>% reframe(means=mean(value)))
+SlidePatientGroup <- dataSchurch %>% group_by(patients, File.Name, groups) %>% reframe()
+impMeans <- left_join(impMeans, SlidePatientGroup, by=join_by(slides==File.Name))
+
+trueQuantile <- left_join(trueQuantile, SlidePatient, by=join_by(slides==File.Name))
+
+yhatQuantile <- left_join(yhatQuantile, SlidePatient, by=join_by(slides==File.Name))
+
+df.plot <- data.frame(quantile=rep(c("90%", "95%", "99%"), 5),
+                      means=NA, sd=NA, 
+                      methods=rep(c("true", "mean","simple" , "local" , "bySample"), each=3))
+
+df.plot.geemean <- df.plot[,c("quantile", "means", "sd","methods")]
+
+
+# pool parameter estimates with Rubin's:
+# mean: mean parameter estimate
+# VarB: the variance of parameter estimate mean, of each imputation
+# VarW: the mean of parameter estimate variance, of each imputation
+quantile.list.df.strat <- left_join(quantile.list.df.strat, SlidePatient, by=join_by(slides==File.Name))
+
+gee.results <- list()
+df.plot.geediff <- df.plot[,c("quantile", "means", "sd","methods")]
+df.plot.geediff$df <- NA
+
+for(i in quantile3){
+  m0 <- gee(real_value ~ groups, id=patients, family='gaussian',
+            corstr = "exchangeable", data=subset(trueQuantile, quantile==i))
+  idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods=="true"
+  df.plot.geediff$means[idx] <- m0$coefficients[2]
+  df.plot.geediff$sd[idx] <- sqrt(m0$robust.variance[2,2])
+  df.plot.geediff$df[idx]<- 44-2
+  df.plot.geediff$tval95[idx]<- qnorm(0.975)
+  m0 <- gee(real_value ~ groups, id=patients, family='gaussian',
+            corstr = "exchangeable", data=subset(yhatQuantile, quantile==i))
+  idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods=="mean"
+  df.plot.geediff$means[idx] <- m0$coefficients[2]
+  df.plot.geediff$sd[idx] <- sqrt(m0$robust.variance[2,2])
+  df.plot.geediff$df[idx]<- 44-2
+  df.plot.geediff$tval95[idx]<- qnorm(0.975)
+  for(m in c("simple", "local", "bySample")){
+    n.imp <- length(levels(quantile.list.df.strat$im))
+    m0.param <- data.frame(mean=rep(NA, n.imp), SE=rep(NA, n.imp))
+    for(ii in 1:n.imp){
+      m0 <- gee(value ~ groups, id=patients, family='gaussian', corstr = "exchangeable", 
+            data=subset(quantile.list.df.strat, (quantile==i&methods==m&im==paste0("X",ii))))
+      m0.param[ii,"mean"] <- m0$coefficients[2]
+      m0.param[ii,"SE"] <- summary(m0)$coefficients[2,4]
+    }
+  idx <- df.plot.geemean$quantile==i&df.plot.geemean$methods==m
+  df.plot.geediff$means[idx] <- mean(m0.param$mean)
+  VARB <- var(m0.param$mean)
+  vars <- sqrt(var(m0.param$mean)*(n.imp+1)/n.imp+mean((m0.param$SE)^2))
+  df.plot.geediff$sd[idx] <- vars
+  df.plot.geediff$df[idx]<- dfCalc(VARB, vars, 10 , 44, 2)
+  df.plot.geediff$tval95[idx] <- qt(0.975, dfCalc(VARB, vars, 10 , 44, 2))
+  }
+  
+}
+df.plot.geediff$marker <- marker
+gee.diff.result[[marker]] <- df.plot.geediff
+}
+gee.diff.result.df <- do.call(rbind, gee.diff.result)
+gee.diff.result.df$methods <- ifelse(gee.diff.result.df$methods=="simple", "Method 1", 
+                                     ifelse(gee.diff.result.df$methods=="local", "Method 2", 
+                                            ifelse(gee.diff.result.df$methods=="bySample", "Method 3", 
+                                                   ifelse(gee.diff.result.df$methods=="true", "True", "Mean"))))
+
+gee.diff.result.df <- subset(gee.diff.result.df, methods != "Mean")
+
+gee.diff.result.df$methods <- factor(gee.diff.result.df$methods, levels=c("True", "Method 1", "Method 2", "Method 3"))
+library(paletteer)
+
+p <- ggplot() +
+  geom_errorbar(data=gee.diff.result.df,aes(ymin=means-tval95*sd, ymax=means+tval95*sd, x=methods, color=methods), position=position_dodge(width=0.4),width=.15)+
+  geom_point(data=gee.diff.result.df,aes(y=means, x=methods, color=methods), position=position_dodge(width=0.4))+
+  facet_grid(marker~quantile, scales = "free")  +scale_x_discrete(guide = guide_axis(angle = -90))+
+  ggtitle("Quantile Difference between \nPatient Groups")+theme_ipsum(axis_text_size = 9)+
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) 
+
+
+ggsave(p, file=paste0("~/ImageImputation/figure/RubinPoolGEEDiffAllmarker.png"), width=6, height=8, dpi=300)
+```
+
