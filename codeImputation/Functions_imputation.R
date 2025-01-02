@@ -387,7 +387,7 @@ metrics_result_markers <- function(markers, root_dir="~/ImageImputation/metricsA
   
   metric.df.all.bias <-
     metric.df.all %>% group_by(phenotype, methods, quantile,marker) %>%
-    reframe(bias.mean = mean(bias), bias.se = sd(bias)*(sqrt(499))/500, sd.ratio=sd(means)/mean(sd),
+    reframe(bias.mean = mean(bias), bias.se = sd(bias)*(sqrt(499))/500, sd.ratio=mean(sd)/sd(means),
             btsp.bias = sqrt(mean((btspmean-truth.mean)^2)), mse.bias=sqrt(mean(bias^2)),
             coverage=mean(coverage))
   
