@@ -18,6 +18,12 @@ This is the figure for the methods
 
 This is the figure for simulation analysis, mIF and Lasso
 
++ $B$ : total number of simulations
++ $\theta$ : parameter from the true data
++ $\hat\theta^b$ : parameter from the true data in each simulation $b$
++ $\hat\theta^b_{syn}$: parameter from synthesized data
+
+
 ::: panel-tabset
 ## 1
 

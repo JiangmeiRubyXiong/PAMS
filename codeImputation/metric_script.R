@@ -140,8 +140,7 @@ for(marker.i in markers1){
 # }
 
 start.time <- Sys.time()
-imputation(marker=marker, trainSlides=trainSlide, testSlides=testSlide,
-           dataset=subData, DIR=Dir, phenotype = phenot)
+btsp_simulation(1)
 Sys.time() - start.time
 
 
