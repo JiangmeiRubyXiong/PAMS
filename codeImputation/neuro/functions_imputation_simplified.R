@@ -29,13 +29,13 @@ source("~/ImageImputation/Functions_imputation.R")
 
 # Generate calibration error
 
-testt_subject_data <- read.csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv")
+testt_subject_data <- read.csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv") # generated from python codes
+testt_subject_data$NewID <- as.character(testt_subject_data$NewID) # the identifier of each object
 # get errors
 FA_diff <- FA_synth_list <- FA_truth_list <- list() # errors for all calibration data
 FA_atlas=readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_WMmask.nii.gz")
 FA_atlas_dim=readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_WMmask.nii.gz")
 data.dir <- "/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/synthetic_brain_2mm"
-
 
 # create a mask
 FA_mask <- readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_WMmask.nii.gz")
@@ -57,8 +57,11 @@ for(i in 0:88){
 
   FA_synth <-  FA_synth[-which(FA_mask==0)];FA_truth <-  FA_truth[-which(FA_mask==0)]
   # print(range(FA_truth))
-  FA_synth_list[[i+1]] <- FA_synth
-  FA_truth_list[[i+1]] <- FA_truth
+  
+  # identifier: the file name for each individual at /media/disk2/beijing_dti/enhanced/unpack, a three digit character
+  new.id <- testt_subject_data$NewID[i+1]
+  FA_synth_list[[new.id]] <- FA_synth
+  FA_truth_list[[new.id]] <- FA_truth
 }
 saveRDS(FA_synth_list, file="/media/disk2/beijing_dti/Neuroimaging/FA_synth_list.rds")
 saveRDS(FA_truth_list, file="/media/disk2/beijing_dti/Neuroimaging/FA_truth_list.rds")
@@ -92,7 +95,6 @@ btsp_simulation <- function(seed.i, data.dir="/media/disk2/beijing_dti/Neuroimag
   btsp.idx.calib <- btsp.idx[1:100]
   
   btsp.idx.testing <- btsp.idx[101:200]
-  
   
   #######################
   ###### use imimp ######
@@ -217,7 +219,69 @@ write.table(files_brain0, file = "/media/disk2/beijing_dti/Neuroimaging/listBrai
 write.table(files_brain_out, file = "/media/disk2/beijing_dti/Neuroimaging/listBraincsv.txt", row.names = FALSE, col.names = FALSE)
 
 # Downstream Analysis
-# Combine all the csvs
+# Step 1: list all bilateral regions
+# Step 2: go back to the mask, and check which regions are still in the mask
+# Step 3: recode the mask to remove bilateral differences
+# Step 4: run FAWM with the new mask
+
+# Function to convert to proper case
+format_camel_case <- function(input_string) {
+  parts <- strsplit(input_string, "_")[[1]]  # Split the string by underscores
+  parts <- tolower(parts)                   # Convert all parts to lowercase
+  parts[1] <- paste0(toupper(substr(parts[1], 1, 1)), substr(parts[1], 2, nchar(parts[1]))) # Capitalize first word
+  paste(parts, collapse = "_")              # Combine parts back with underscores
+}
+
+regions_all <- read.table("/media/disk2/beijing_dti/Neuroimaging/Eve_Atlas-master/JHU_MNI_SS_WMPM_Type-III_SlicerLUT.txt")
+names(regions_all) <- c("label", "name", "c1", "c2", "c3", "c4")
+regions_all$name <- unlist(lapply(regions_all$name, format_camel_case))
+list_names <- strsplit(regions_all$name, split="_")
+regions_all$LR <- unlist(lapply(list_names, last))
+
+regions_all$LR <- ifelse(regions_all$LR %in% c("left", "right"), regions_all$LR, "All")
+
+region_pair <- unlist(lapply(list_names, function(x){
+  if(last(x) %in% c("left", "right"))x=x[-length(x)]
+if(any(x==""))x=x[-which(x=="")]
+paste0(x, collapse="_")}))
+
+regions_all$name <- region_pair
+
+regions <- regions_all
+regions_WM <- c(1,3,4,5,6,7,8,9,10,11,14,15,16,18,19,20,64,65,66,67,68,69,70,72,73,74,75,76,77,79,80,81,39,40,51,52,53,99)
+regions <- regions[regions$label %in% regions_WM,]
+
+# sort through the data frame to pair the left and right parts
+pairs <- table(regions$name)
+singles <- names(pairs)[pairs==1]
+singles_code <- regions$label[which(regions$name %in% singles)]
+# add the pair back to the lists
+for(i in singles_code){
+  idx <- which (regions_all$label==i)
+  namei <- regions_all$name[idx]
+  sidei <- regions_all$LR[idx]
+  rowidx <- which(regions_all$name == namei & regions_all$LR != sidei)
+  regions <- rbind (regions, regions_all[rowidx, ])
+}
+
+# In mask, assign all left side label to right side
+# While at the same time, collect all regions that are present
+
+FA_mask <- readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask2.nii.gz")
+regions_names <- unique(regions$name)
+mask_regions <- c()
+for(namei in regions_names){
+  left_num <- regions$label[regions$name==namei & regions$LR=="left"]
+  right_num <- regions$label[regions$name==namei & regions$LR=="right"]
+  if(any(FA_mask %in% c(left_num, right_num))){
+    print(c(left_num, right_num))
+    mask_regions <- c(mask_regions, namei)
+    if(any(FA_mask == left_num)){FA_mask[FA_mask == left_num] <- right_num}
+  }
+}
+writeNifti(FA_mask,"/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask3.nii.gz")
+FA_mask <- readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask3.nii.gz")
+
 # row_LR_pair <- data.frame(left=c( 8,  2, 39, 10, 5, 15, 19,
 #                                   11,  4, 16, 20,  7,   6, 27,  3, 14, 1, 18, 59),
 #                           right=c(70, 13, 99, 72,  67, 76, 80,
@@ -233,77 +297,78 @@ write.table(files_brain_out, file = "/media/disk2/beijing_dti/Neuroimaging/listB
 #                                     "Genu_of_corpus_callosum_left", "Splenium_of_corpus_callosum_left", 'Precuneus_left'))
 
 # keep only white matter
+# 
+# 
+# row_LR_pair <- data.frame(left=c( 8, 39, 10,
+#                                   5, 15, 19,
+#                                   11,  4, 16, 20,
+#                                   7,   6, 
+#                                   3, 14, 1, 18),
+#                           right=c(70,  99, 72,
+#                                   67, 76, 80,
+#                                   73, 66, 77, 81, 
+#                                   69, 68, 
+#                                   65, 75, 64, 79), 
+#                           names=c("ANGULAR",  'Cingulum_cingulate_gyrus', 'CUNEUS',
+#                                   'INFERIOR_FRONTAL', 'INFERIOR_OCCIPITAL', 'INFERIOR_TEMPORA',
+#                                   'LINGUAL', 'MIDDLE_FRONTAL', 'MIDDLE_OCCIPITAL', 'MIDDLE_TEMPORA',
+#                                   'POSTCENTRAL', 'PRECENTRAL',
+#                                   'SUPERIOR_FRONTAL', 'SUPERIOR_OCCIPITAL', 'SUPERIOR_PARIETAL', 'SUPERIOR_TEMPORAL'))
+# row_LR_single <- data.frame(singles = c(74, 9,
+#                                         52, 40, 51, 53),
+#                             names= c('Fusiform_right', 'Precuneus_left',
+#                                      "Body_of_corpus_callosum", "Cingulum_hippocampus_left",
+#                                      "Genu_of_corpus_callosum_left", "Splenium_of_corpus_callosum_left"))
+# 
+# library(stringr)
+# 
+# 
+# 
+# row_wm <- list(row_LR_pair, row_LR_single)
+# 
+
+row_wm <- subset(regions, LR=="right"&name%in%mask_regions, c("label", "names"))
+row_wm$names <- lapply(row_wm$names, function(string){gsub("[()]","", string)}) %>% unlist()
+row_wm$names <- lapply(row_wm$names, function(string){gsub("-","_", string)}) %>% unlist()
+saveRDS(row_wm, file="/media/disk2/beijing_dti/Neuroimaging/brain_ROI.rds")
+
+#### Here redid FAWM with the new FA atlas
+### wont need csv_filter since it is processed already
+
+# csv_filter <- function(input_path, rows=row_wm, input_base ="/media/disk2/beijing_dti/Neuroimaging/imputation_csv",
+#                        output_base = "/media/disk2/beijing_dti/Neuroimaging/imputation_rds"){
+#   
+#   df_csv <- read.delim(input_path, sep="", header = FALSE, stringsAsFactors = FALSE)
+#   df_csv_mean <- df_csv[-(1:2), 1:2]
+#   names(df_csv_mean) <- c("LabelID", "Mean")
+#   
+#   # combine the region names
+#   # row_left <- rows[[1]]$left;row_right <- rows[[1]]$right; 
+#   # df_csv_mean_LR <- (as.numeric(unlist(subset(df_csv_mean, LabelID %in% row_left, Mean)))+
+#   #                      as.numeric(unlist(subset(df_csv_mean, LabelID %in% row_right, Mean))))/2
+#   # df_csv_mean_S <- as.numeric(unlist(subset(df_csv_mean, LabelID %in% rows[[2]]$singles, Mean)))
+#   # df_csv_out <- data.frame(names=c(rows[[1]]$names, rows[[2]]$names),
+#   #                          value=c(df_csv_mean_LR, df_csv_mean_S))
+#   
+#   # Derive the output file path by replacing the base directory and extension
+#   relative_path <- sub(input_base, "", input_path) # Get relative path from the base directory
+#   output_path <- paste0(output_base, dirname(relative_path), "/",
+#                            sub("\\.csv$", ".rds", basename(relative_path)))
+#   
+#   # Create the output directory if it doesn't exist
+#   output_dir <- dirname(output_path)
+#   if (!dir.exists(output_dir)) {
+#     dir.create(output_dir, recursive = TRUE)
+#   }
+# 
+#   saveRDS(df_csv_out, output_path)
+# }
+# files_brain_out <- read.table("/media/disk2/beijing_dti/Neuroimaging/listBraincsv.txt")[[1]]
+# # Apply the function to all CSV files
+# mclapply(files_brain_out, csv_filter, mc.cores=30, mc.preschedule = FALSE)
 
 
-row_LR_pair <- data.frame(left=c( 8, 39, 10,
-                                  5, 15, 19,
-                                  11,  4, 16, 20,
-                                  7,   6, 
-                                  3, 14, 1, 18),
-                          right=c(70,  99, 72,
-                                  67, 76, 80,
-                                  73, 66, 77, 81, 
-                                  69, 68, 
-                                  65, 75, 64, 79), 
-                          names=c("ANGULAR",  'Cingulum_cingulate_gyrus', 'CUNEUS',
-                                  'INFERIOR_FRONTAL', 'INFERIOR_OCCIPITAL', 'INFERIOR_TEMPORA',
-                                  'LINGUAL', 'MIDDLE_FRONTAL', 'MIDDLE_OCCIPITAL', 'MIDDLE_TEMPORA',
-                                  'POSTCENTRAL', 'PRECENTRAL',
-                                  'SUPERIOR_FRONTAL', 'SUPERIOR_OCCIPITAL', 'SUPERIOR_PARIETAL', 'SUPERIOR_TEMPORAL'))
-row_LR_single <- data.frame(singles = c(74, 9,
-                                        52, 40, 51, 53),
-                            names= c('Fusiform_right', 'Precuneus_left',
-                                     "Body_of_corpus_callosum", "Cingulum_hippocampus_left",
-                                     "Genu_of_corpus_callosum_left", "Splenium_of_corpus_callosum_left"))
-
-library(stringr)
-
-# Function to convert to proper case
-format_camel_case <- function(input_string) {
-  parts <- strsplit(input_string, "_")[[1]]  # Split the string by underscores
-  parts <- tolower(parts)                   # Convert all parts to lowercase
-  parts[1] <- paste0(toupper(substr(parts[1], 1, 1)), substr(parts[1], 2, nchar(parts[1]))) # Capitalize first word
-  paste(parts, collapse = "_")              # Combine parts back with underscores
-}
-
-row_LR_pair$names <- unlist(lapply(row_LR_pair$names, format_camel_case))
-
-row_wm <- list(row_LR_pair, row_LR_single)
-
-csv_filter <- function(input_path, rows=row_wm, input_base ="/media/disk2/beijing_dti/Neuroimaging/imputation_csv",
-                       output_base = "/media/disk2/beijing_dti/Neuroimaging/imputation_rds"){
-  
-  df_csv <- read.delim(input_path, sep="", header = FALSE, stringsAsFactors = FALSE)
-  df_csv_mean <- df_csv[-(1:2), 1:2]
-  names(df_csv_mean) <- c("LabelID", "Mean")
-  
-  # combine the region names
-  row_left <- rows[[1]]$left;row_right <- rows[[1]]$right; 
-  df_csv_mean_LR <- (as.numeric(unlist(subset(df_csv_mean, LabelID %in% row_left, Mean)))+
-                       as.numeric(unlist(subset(df_csv_mean, LabelID %in% row_right, Mean))))/2
-  df_csv_mean_S <- as.numeric(unlist(subset(df_csv_mean, LabelID %in% rows[[2]]$singles, Mean)))
-  df_csv_out <- data.frame(names=c(rows[[1]]$names, rows[[2]]$names),
-                           value=c(df_csv_mean_LR, df_csv_mean_S))
-  
-  # Derive the output file path by replacing the base directory and extension
-  relative_path <- sub(input_base, "", input_path) # Get relative path from the base directory
-  output_path <- paste0(output_base, dirname(relative_path), "/",
-                           sub("\\.csv$", ".rds", basename(relative_path)))
-  
-  # Create the output directory if it doesn't exist
-  output_dir <- dirname(output_path)
-  if (!dir.exists(output_dir)) {
-    dir.create(output_dir, recursive = TRUE)
-  }
-
-  saveRDS(df_csv_out, output_path)
-}
-files_brain_out <- read.table("/media/disk2/beijing_dti/Neuroimaging/listBraincsv.txt")[[1]]
-# Apply the function to all CSV files
-mclapply(files_brain_out, csv_filter, mc.cores=30, mc.preschedule = FALSE)
-
-
-##### sex variable in all simulations
+##### sex and age variable in all simulations
 testt_subject_data <- read_csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv")
 btsp_simulation_sex <- function(seed.i, data.dir="/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/synthetic_brain_2mm",
                             phenotype=FALSE, n.imp=10, sub_data = testt_subject_data){
@@ -311,132 +376,163 @@ btsp_simulation_sex <- function(seed.i, data.dir="/media/disk2/beijing_dti/Neuro
   DIR="/media/disk2/beijing_dti/Neuroimaging/imp_res"
   # bootstrap 200 out of 89
   # read data
-
+  testt_subject_data <- read_csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv")
   btsp.idx <- sample(1:89, 200, replace=TRUE)
   # split 100 as calibration, 100 as testing
   btsp.idx.calib <- btsp.idx[1:100]
   
   btsp.idx.testing <- btsp.idx[101:200]
-  return(sub_data$Sex[btsp.idx.testing])
+  return(sub_data[btsp.idx.testing, c("Sex", "Age")])
   }
 
 sex.var <- lapply(1:200, btsp_simulation_sex)
 
-# Combine the data results
-singleImpData <- function(path.data){
+
+
+# This function is applied to one simulation one type of MULTIPLE imputation
+# Imput: simulation number, input type, 
+# Combine testing, and calibration
+# Regression for all regions
+# returns coefficients and variance
+
+
+row_wm <- readRDS("/media/disk2/beijing_dti/Neuroimaging/brain_ROI.rds")
+## keep only region of interest
+read_brain_csv <- function(input_path, roi_df = row_wm){
+    # read in data
+    df_csv <- read.delim(input_path, sep="", header = FALSE, stringsAsFactors = FALSE)
+    df_csv_mean <- df_csv[-(1:2), 1:2]
+    df_csv_mean <- data.frame(lapply(df_csv_mean, as.numeric))
+    names(df_csv_mean) <- c("label", "value")
+    # filter out regions not of interest
+    df_csv_mean <- left_join(row_wm, df_csv_mean, by="label")
+    return(df_csv_mean[,c("names", "value")])
+}
+
+singleImpData <- function(path.data, sex.vec=sex.var, sim.i){
+  # read all individual data in the same simulation
   files_imp <- list.files(path = path.data, full.names = TRUE)
-  list.df <- lapply(files_imp, readRDS)
-  names_brain <- list.df[[1]][[1]]
+  list.df <- lapply(files_imp, read_brain_csv)
   list.df <- data.frame(t(do.call(cbind, lapply(list.df, "[[", 2))))
-  names(list.df) <- names_brain
-  return(list.df)
-}
-# GLM
-regres <- function(dataset){
-  modeli <- glm(sex~., family = "binomial",dataset)
-  sum_modeli <- summary(modeli)
-  return(sum_modeli$coefficients[,1:2])
-}
 
-# logistic regression Function
-
-# this function is applied to one simulation one type of MULTIPLE imputation
-gee_results_neuro <- function(sim.idx, type="hier",sex.vars=sex.var){
-
-  sex.var.i <- sex.var[[sim.idx]]
-  DIR="/media/disk2/beijing_dti/Neuroimaging/imputation_rds/simulation1/hierImp/Imputation1/"
-  DIR = paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_rds/simulation", sim.idx, "/", type, "Imp")
-  files.sim <- list.dirs(DIR, full.names = TRUE)[-1]
-  imp.dataset <- lapply(files.sim, singleImpData)
-  imp.dataset <- lapply(imp.dataset, cbind, sex=sex.var.i)
-  # combine DIR# combine all the individuals in the 
-  if(!type %in% c("truth, mean")){
-    regres.out <- lapply(imp.dataset, regres)
-    ### use Rubin's rule to combine
-    df.plot.geediff$means[idx] <- mean(m0.param$mean)
-    VARB <- var(m0.param$mean)
-    # vars <- sqrt(var(m0.param$mean)*(n.imp+1)/n.imp+mean((m0.param$SE)^2))
-    # df.plot.geediff$sd[idx] <- vars
-    # df.plot.geediff$stats[idx] <- qt(0.975, dfCalc(VARB, vars, 10 , 200, 2))
+  # read calibration data
+  calibi <- readRDS(paste0("/media/disk2/beijing_dti/enhanced/Calib_df/calib_sim_",sprintf("%03d", sim.i),".rds"))
+  list.df <- data.frame(list.df, sex.vec[[sim.i]])
+  names(list.df) <- names(calibi)
+  list.df <- rbind(list.df, calibi)
+  names_brain <- names(list.df)[1:(ncol(list.df)-2)]
+  
+  list.res <- list()
+  for(ROI in names_brain){
+    formulai <- as.formula(paste0(ROI," ~ Sex + Age"))
+    list.res[[ROI]] <- summary(lm(formulai, data=list.df))[["coefficients"]][2,1:2]
   }
-   
+  # regression analysis
+  return(list.res)
+}
+
+# function: reorder the nested list in the multiple imputation lists,
+# then combine the imputations results
+# and do rubin's rule calculation
+source("~/ImageImputation/dfCalc.R")
+region.list <- function(roi, data.list, n.imp=10){
+  # reorder the nested list in the multiple imputation lists
+  lists <- lapply(data.list, "[[", roi)
+  # combine the imputations results
+  list.df <- do.call(rbind,lists)
+  # rubin's rule calculation
+  means <- list.df[,1]
+  ses <- list.df[,2]
+  VARB <- var(means)
+  vars <- sqrt(var(means)*(n.imp+1)/n.imp+mean(ses^2))
+  stats <- qt(0.975, dfCalc(VARB, vars, 10 , 200, 2))
+  return(data.frame(mean=mean(means), sd=vars, stats=stats))
+  }
+
+
+# this function deals with all simulations in the analysis
+lm_results_neuro_simulation <- function(sim.idx){
+  # find the location of simulation folder of data frames
+  DIR=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_csv/simulation", sim.idx)
+  # do the same analysis for a set of data
+ 
+  hier_list_results <- lapply(list.dirs(DIR)[3:12], singleImpData, sim.i = sim.idx)
+  local_list_results <- lapply(list.dirs(DIR)[14:23], singleImpData, sim.i = sim.idx)
+  simple_list_results <- lapply(list.dirs(DIR)[26:35], singleImpData, sim.i  = sim.idx)
+  mean_list_results <- singleImpData(list.dirs(DIR)[24], sim.i = sim.idx)
   
+  # Rubin's rule for multiple imputation results
+  brain_roi <- names(hier_list_results[[1]])
+  # original results list: imputation, regions ; reorder to regions, imputation
+  hier_list_results <- lapply(brain_roi, region.list ,data.list = hier_list_results)
+  local_list_results <- lapply(brain_roi, region.list ,data.list = local_list_results)
+  simple_list_results <- lapply(brain_roi, region.list ,data.list = simple_list_results)
   
+  res.list <- list(meanImp = mean_list_results, simpleImp = simple_list_results,
+                   localImp = local_list_results, hierImp = hier_list_results)
+  saveRDS(res.list, file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_reg_res/simulation", sim.idx, ".rds"))
+}
+
+
+#### function: put data to nifti plots
+
+## function: calculate metrics: bias, se, etc for all methods
+
+
+
+## function: input: dataset, output: plot data frame
+
+background <- readNifti("/home/xiongj3/fsl/data/standard/MNI152_T1_2mm_brain.nii.gz")
+mask.wm <- readNifti("/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask3.nii.gz")
+mask.wm[!mask.wm %in% row_wm$label] <- 0
+
+plot.brain.dfcreate <- function(param.data, mask = mask.wm, bg = background,
+                                region_match_df=row_wm, slices=c(35 ,40, 45, 50, 55,60)){
+  names(region_match_df) <- c("value", "regions")
+  param.data <- data.frame(param.data)
+  colnames(param.data) <- "Estimate"
   
+  new_data <- data.frame(param.data, region_match_df)
+  FA_atlas_new <- mask
+  for(i in 1:nrow(new_data)){
+      FA_atlas_new[which(mask==new_data$value[i])] <- new_data$Estimate[i]
+  }
   
-  for(i in quantile3){
-    ### true data for simulation subset
-    m0 <- gee(real_value ~ groups, id=patients, family='gaussian',
-              corstr = "exchangeable", data=subset(trueData, quantile==i))
-    idx <- df.plot.geediff$quantile==i&df.plot.geediff$methods=="true"
-    df.plot.geediff$means[idx] <- m0$coefficients[2]
-    df.plot.geediff$sd[idx] <- sqrt(m0$robust.variance[2,2])
-    df.plot.geediff$stats[idx] = qnorm(0.975)
-    ### mean imputation
-    m0 <- gee(real_value ~ groups, id=patients, family='gaussian',
-              corstr = "exchangeable", data=subset(meanData, quantile==i))
-    idx <- df.plot.geediff$quantile==i&df.plot.geediff$methods=="mean"
-    df.plot.geediff$means[idx] <- m0$coefficients[2]
-    df.plot.geediff$sd[idx] <- sqrt(m0$robust.variance[2,2])
-    df.plot.geediff$stats[idx] = qnorm(0.975)
+  bg.list <- value.list <- list()
+  for(i in 1:length(slices)){
+    slicei <- slices[i]
+    # Slice white matter background
+    bg_df <- reshape2::melt(bg[,,slicei])  # Converts to long format with Var1, Var2, and value
+    bg_df <- bg_df[bg_df$value>0,]
+    colnames(bg_df) <- c("x", "y", "intensity")
+    bg_df$z <- slicei
+    bg.list[[i]] <- bg_df
     
-    for(m in c("simple", "local", "bySample")){
-      n.imp <- length(levels(quantile.list.df.strat$im))
-      m0.param <- data.frame(mean=rep(NA, n.imp), SE=rep(NA, n.imp))
-      names(trueQuantiletrain)[which(names(trueQuantiletrain)=="real_value")] <- "value"
-      for(ii in 1:n.imp){
-        dataImp <- subset(quantile.list.df.strat, (quantile==i&methods==m&im==paste0("X",ii)))
-        trueQuantiletrainSub <- subset(trueQuantiletrain, quantile==i)
-        dataImp <- rbind(trueQuantiletrainSub, dataImp[, names(trueQuantiletrain)])
-        m0 <- gee(value ~ groups, id=patients, family='gaussian', corstr = "exchangeable",
-                  data=dataImp)
-        m0.param[ii,"mean"] <- m0$coefficients[2]
-        m0.param[ii,"SE"] <- summary(m0)$coefficients[2,4]
-      }
-      idx <- df.plot.geediff$quantile==i&df.plot.geediff$methods==m
-
-    }
+    # Convert matrices to data frames with correct coordinates
+    # Take slice
+    value_df <- reshape2::melt(FA_atlas_new[,,slicei])
+    mask_df <- reshape2::melt(mask[,,slicei])
+    # carve out non-zero parts
+    value_df <- value_df[mask_df$value>0,]
+    mask_df <- mask_df[mask_df$value>0,]
+    # add region name to dataset
+    mask_df <- left_join(mask_df, region_match_df, by="value")
+    value_df$region <- mask_df$region
+    # Rename columns for clarity
+    colnames(value_df)[1:3] <- c("x", "y", "intensity")
+    value_df$z <- slicei
+    value.list[[i]] <- value_df
   }
-  save(df.plot.geediff, file = paste0(DIR, "df.plot.geediff.RData"))
-  
-  # calculate metrics:
-  true.df.plot.geediff <- get(load(tru.dir))
-  #Bias: parameter value: the average difference between true and imputed (baseline: test+train; methods: test, imputation methods)
-  
-  # Width of confidence interval: ratio between (test+train) and (imputation methods)
-  df.plot.geediff$cinf.upper <- df.plot.geediff$means + df.plot.geediff$sd * df.plot.geediff$stats
-  df.plot.geediff$cinf.lower <- df.plot.geediff$means - df.plot.geediff$sd * df.plot.geediff$stats
-  df.plot.geediff$int.length <- df.plot.geediff$sd * df.plot.geediff$stats
-  
-  df.plot.geediff.subsetTrue <- subset(df.plot.geediff, methods=="true")
-  df.plot.geediff <- subset(df.plot.geediff, methods!="true")
-  bias <- df.plot.geediff[, "means"] - true.df.plot.geediff[, "means"]
-  
-  ratio <- df.plot.geediff[, "int.length"] / true.df.plot.geediff[, "int.length"]
-  #Coverage: parameter value: how often on average, each method covers the true parameter (baseline: test+train; methods: test, imputation methods)
-  coverage <- (df.plot.geediff[, "cinf.lower"] <= true.df.plot.geediff[, "means"]) &
-    (true.df.plot.geediff[, "means"] <= df.plot.geediff[, "cinf.upper"])
-  metric.df <- data.frame(quantile = df.plot.geediff[, "quantile"],
-                          methods = df.plot.geediff[, "methods"], means=df.plot.geediff[, "means"],
-                          btspmean = df.plot.geediff.subsetTrue[, "means"],
-                          bias=bias, ratio=ratio, coverage=coverage, 
-                          coverage.check=df.plot.geediff$int.length>abs(bias),
-                          sd=df.plot.geediff$sd,
-                          stats=df.plot.geediff$stats)
-  
-  save(metric.df, file = paste0(DIR, "metric.df.RData"))
-  
-  #sanity check: how does the subset truth CI covers the true parameter
-  coverage.truth <- (df.plot.geediff.subsetTrue[, "cinf.lower"] <= true.df.plot.geediff[, "means"]) &
-    (true.df.plot.geediff[, "means"] <= df.plot.geediff.subsetTrue[, "cinf.upper"])
-  
-  save(coverage.truth, file = paste0(DIR, "coverageTruth.RData"))
-  
-  # return gee results
+  bg.df <- do.call(rbind, bg.list)
+  value.df <- do.call(rbind, value.list)
+  return(list(bg.df, value.df))
 }
 
-#### DO the same thing for the TRUTH
+## function:  generate and combine dataframe, and plot wrap 6 slices and 4 methods
+brain.plot <- function(){
+
+}
 
 
 
-####### Combine the calibration data
+

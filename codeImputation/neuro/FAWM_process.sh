@@ -33,10 +33,10 @@ FA_IMAGE_FILE="/media/disk2/beijing_dti/Neuroimaging/listCalibFiles.txt"
 OUTPUT_FILE_FILE="/media/disk2/beijing_dti/Neuroimaging/listCalibcsv.txt"
 
 # Atlas path
-ATLAS="/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask2.nii.gz" 
+ATLAS="/media/disk2/beijing_dti/Neuroimaging/train_T1_FA/FA_2mm_FAmask3.nii.gz" 
 
 # Run jobs in parallel
-paste "$FA_IMAGE_FILE" "$OUTPUT_FILE_FILE" | tr -d '"' | xargs -P 8 -n 2 bash -c '
+paste "$FA_IMAGE_FILE" "$OUTPUT_FILE_FILE" | tr -d '"' | xargs -P 20 -n 2 bash -c '
     FA_IMAGE="$0"
     OUTPUT_FILE="$1"
     OUTPUT_DIR=$(dirname "$OUTPUT_FILE")
