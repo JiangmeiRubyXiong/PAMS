@@ -1,0 +1,584 @@
+---
+title: "Neuroimaging Analysis"
+author: "Ruby Xiong"
+date: "April 16th, 2025"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+    code-fold: true
+    code-summary: "Click to show/hide code" 
+execute:
+  warning: false
+lightbox: true
+---
+```{r}
+library(knitr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(dplyr)
+library(paletteer)
+# documents
+# ~/ImImp/codeImputation/neuro/functions_imputation_simplified_2.R
+```
+
+# Data overview
+
+- 180 patients in original dataset
+  - remove 2 patients without FA
+- split into 89 training, 89 testing (+ calibration)
+- bootstrap 89 testing into 500. Split into 250 test and 250 calibration
+- simulate 500 times
+- regression: region ~ sex + age. The covariate of interest is sex.
+
+Regions:
+```{r}
+row_wm_100 <-  readRDS("/media/disk2/beijing_dti/Neuroimaging/brain_ROI_100.rds")
+truedata_100 <- readRDS("/media/disk2/beijing_dti/Neuroimaging/imputation_reg_res/truedata_100.rds")
+row_wm_100$names
+format_string <- function(input_str) {
+  # Replace "_wm" and "_" with space
+  cleaned <- gsub("_wm|_", " ", input_str)
+  
+  # Split and capitalize (except "of")
+  words <- strsplit(cleaned, " ")[[1]]
+  words <- sapply(words, function(word) {
+    if (tolower(word) == "of") {
+      "of"
+    } else {
+      paste0(toupper(substring(word, 1, 1)), tolower(substring(word, 2)))
+    }
+  })
+  
+  # Add \n after "Cingulum" or "of"
+  result <- c()
+  for (word in words) {
+    result <- c(result, word)
+    if (word == "Cingulum" || word == "of") {
+      result <- c(result, "\n")
+    }
+  }
+  
+  # Collapse into one string, remove any extra space before/after \n
+  output <- gsub(" \n", "\n", paste(result, collapse = " "))
+  output <- gsub("\n ", "\n", output)
+  
+  return(output)
+}
+for(i in 1:nrow(row_wm_100)){
+  row_wm_100$names[i] <- format_string(row_wm_100$names[i])
+}
+```
+
+# Analysis results
+
+```{r}
+## calculate metrics: bias, se, etc for all methods
+all.data <- lapply(1:500, function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/simulation",i,".rds"))})
+# all.data.complete <- lapply(1:500,
+                         # function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region/complete", i, ".rds"))})
+# all.data <- Map(function(x, y) c(list(complete = y), x), all.data, all.data.complete)
+list.orders <- names(all.data[[1]])
+all.data <- lapply(list.orders, function(i){lapply(all.data, "[[", i)}) 
+names(all.data) <- list.orders
+all.data.means <- lapply(all.data, function(lists){vector <- lapply(lists, do.call, what=rbind)
+                                                   vector <- lapply(vector, function(matr){matr[,1]})
+                                                   do.call(cbind, vector)})
+all.data.mean <- lapply(all.data.means, rowMeans)
+
+
+all.data.bias.mean <- lapply(all.data.mean, function(x, truemean=truedata_100){x-truemean[,1]})
+
+all.data.se <- lapply(all.data, function(lists){vector <- lapply(lists, do.call, what=rbind)
+                                                vector <- lapply(vector, function(matr){matr[,2]})
+                                                do.call(cbind, vector)})
+
+# simulation truth calculation
+true.data.sim <- lapply(1:500, function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/truedata",i,".rds"))})
+true.data.means <- do.call(cbind,lapply(true.data.sim, function(x){x[,1]}))
+true.data.mean <- rowMeans(true.data.means)
+
+row.se <- function(x){
+  vec.sd <- list()
+  for(i in 1:nrow(x)){
+    vec.sd[[i]] <- sd(x[i,])
+  }
+  return(unlist(vec.sd))
+}
+true.data.est.se <- row.se(true.data.means)
+
+# Mean SE with model
+all.data.se.mean <- lapply(all.data.se, rowMeans)
+# SE of estimator
+
+all.data.est.se <- lapply(all.data.means, row.se)
+
+all.data.ratio.2 <- mapply(function(upper, lower){return(upper/lower)},
+                            all.data.se.mean, all.data.est.se, SIMPLIFY = FALSE)
+
+# MSE
+## Numerator
+all.data.means <- lapply(all.data, function(lists){vector <- lapply(lists, do.call, what=rbind)
+                                                    vector <- lapply(vector, function(matr){matr[,1]})
+                                                    do.call(cbind, vector)})
+mse.bias <-  function(x, truedata=truedata_100){
+  vec.mse <- list()
+  x <- x - matrix(truedata[,1], nrow=nrow(truedata), ncol=ncol(x), byrow = FALSE)
+  for(i in 1:nrow(x)){
+    vec.mse[[i]] <- sqrt(mean(x[i,]^2))
+  }
+  return(unlist(vec.mse))
+}
+all.data.mse.est <- lapply(all.data.means, mse.bias)
+## Denominator
+sim.res <- lapply(1:500, function(x){
+  readRDS(paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/truedata",x,".rds"))[,1]})
+sim.res <- do.call(cbind, sim.res)
+sim.res.bias <- mse.bias(sim.res)
+## ratio
+all.data.ratio.3 <- lapply(all.data.mse.est,function(upper, lower=sim.res.bias){return(upper/lower)})
+
+# Coverage
+all.data.means <- lapply(all.data, function(lists){vector <- lapply(lists, do.call, what=rbind)
+                                                    vector <- lapply(vector, function(matr){matr[,1]})
+                                                    do.call(cbind, vector)})
+all.data.bias.abs <- lapply(all.data.means, function(x, truedata=truedata_100){
+  abs(x - matrix(truedata[,1], nrow=nrow(truedata), ncol=ncol(x), byrow = FALSE))
+})
+
+
+all.data.stats <- lapply(all.data[3:4], function(lists){vector <- lapply(lists, do.call, what=rbind)
+                                                    vector <- lapply(vector, function(matr){matr[,3]})
+                                                    do.call(cbind, vector)})
+all.data.stats <- c(list(matrix(1.96, nrow=nrow(row_wm_100), ncol=500)),
+                    list(matrix(1.96, nrow=nrow(row_wm_100), ncol=500)),
+                         all.data.stats)
+
+all.data.coverage <- mapply(function(stats, se, abs.bias){return(stats * se >= abs.bias)}, 
+                            all.data.stats, all.data.se, all.data.bias.abs, SIMPLIFY = FALSE)
+all.data.coverage.perc <- lapply(all.data.coverage, rowMeans)
+```
+
+
+## Figure 1: bias
+
+Bias of the estimator This plot is a point&bar plot, where:
+
+1.  the point: the mean bias across all bootstrap simulations: $$
+      \hat{Bias}(\theta_{syn})=\frac1B\sum(\hat\theta^b_{syn}-\theta)
+      $$
+2.  The standard deviation times 1.96 $$
+      s = \frac{1}{B}\sqrt{\sum_{b=1}^B(\theta^b_{syn}-\frac{\sum\hat\theta^b_{syn}}B)^2}
+      $$
+```{r fig.height=10, fig.width=10}
+## figure 1
+# truedata_100$regions <- rownames(truedata_100)
+
+# brain.df.all.bias <- data.frame(bias.mean= c(truedata_100$Estimate,true.data.mean,unlist(all.data.mean)),
+#                                 bias.se = (c(truedata_100$StdError,true.data.est.se,unlist(all.data.est.se)))*sqrt(499/(500^2)),
+#                                 methods =rep(c("True","BTSP",list.orders), each=nrow(row_wm_100)),
+#                                 regions=c(rownames(truedata_100),rownames(true.data.sim[[1]]),rep(row_wm_100$names, length(list.orders))),
+#                                 significant = rep( factor(truedata_100$pval<0.2), (length(list.orders)+2)))
+# brain.df.all.bias$methods <- factor(brain.df.all.bias$methods, levels=c(rev(list.orders), "BTSP", "True"))
+# p1_old <- ggplot(brain.df.all.bias)+
+#   geom_errorbar(aes(xmin=bias.mean-1.96*bias.se, xmax=bias.mean+1.96*bias.se, y=methods, color = significant), width=.2, position=position_dodge(.9)) +
+#   geom_point(aes(x=bias.mean, y=methods, color = significant), alpha=0.7)+ scale_x_continuous(n.breaks = 3)+ 
+#   geom_vline(aes(xintercept=Estimate), data=truedata_100, linetype=3, alpha=0.6)+theme_minimal()+ggtitle(paste0("Mean in 200 reps: n=500, with calibration"))+xlab("Bias")+
+#   facet_wrap(~regions, nrow=3, scales = "free_x")+ labs(colour="p.val < 0.2")
+# p1_old
+list.orders.new <- c("Complete", "Synthesis", "MultSynth", "PAMS")
+brain.df.all.new <- data.frame(bias.mean= unlist(all.data.mean),
+                                bias.se = unlist(all.data.est.se)*sqrt(499/(500^2)),
+                                methods = rep(c("Complete", "Synthesis", "MultSynth", "PAMS"), each=nrow(row_wm_100)),
+                                regions=rep(row_wm_100$names, length(list.orders)),
+                                significant = rep(factor(truedata_100$pval<0.2), length(list.orders)))
+brain.df.all.new$methods <- factor(brain.df.all.new$methods, levels=c("Complete", "Synthesis", "MultSynth", "PAMS"))
+
+truedata_100$regions <- unlist(lapply(rownames(truedata_100), format_string))
+p1_new <- ggplot(brain.df.all.new)+
+  geom_point(aes(y=bias.mean, x=methods), color = "#5D7A96", alpha=0.7, position=position_dodge(.9))+ scale_y_continuous(n.breaks = 3)+ 
+  geom_hline(aes(yintercept=Estimate, linetype="True Parameter"), data=truedata_100, color="forestgreen", alpha=0.8)+
+    scale_linetype_manual(values = c("True Parameter" = "dashed"), name = NULL) + theme_minimal()+
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  ggtitle(paste0("Expected Value of Sex Group Difference"))+ylab("Difference in Region Mean")+ xlab("Method")+
+  facet_wrap(~regions, ncol=5, scales = "free")+ labs(colour="Phenotype")
+p1_new
+```
+      
+      
+## Figure 2: Accuracy of standard error estimation
+
+This is fraction of
+
+1.  Numerator
+$$
+\hat E(\hat{SE}(\hat\theta^b_{Imp}))=\frac1B\sum_{b=1}^B\hat{SE}(\hat\theta^b_{Imp})
+$$ 
+where 
+
+$\hat{SE}(\hat\theta^b_{Imp})$ is generated with the GEE parameter SE and rubin's rule.
+
+2.  Denominator 
+$$
+\hat{SE}(\hat\theta^b_{Imp})=\sqrt{\frac1{B-1}\sum_{b=1}^B(\hat\theta^b_{Imp}-\frac1B\sum{\hat\theta^b_{Imp}})^2}
+$$
+      
+      
+```{r fig.height=6, fig.width=10}
+brain.df.all.bias.2 <- data.frame(sd.ratio = unlist(all.data.ratio.2),
+                                methods = rep(list.orders, each=17),
+                                regions=rep(row_wm_100$names, length(list.orders)),
+                                significant = rep( factor(truedata_100$pval<0.2), length(list.orders)))
+brain.df.all.bias.2$methods <- factor(brain.df.all.bias.2$methods, levels=rev(list.orders))
+brain.df.all.new.2 <- data.frame(sd.ratio = unlist(all.data.ratio.2),
+                                methods =rep(list.orders.new, each=nrow(row_wm_100)),
+                                regions=rep(row_wm_100$names, length(list.orders.new)))
+brain.df.all.new.2$methods <- factor(brain.df.all.new.2$methods, levels=list.orders.new)
+
+p2_new <- ggplot(brain.df.all.new.2)+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill = "#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+  geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+  guides(fill = guide_legend(override.aes = list(width = NA)))+
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  ggtitle(paste0("Standard Error Estimation Accuracy"))+
+  facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of Standard Deviation")
+p2_new
+
+
+# # With complete data
+# brain.df.all.bias.2 <- data.frame(sd.ratio = unlist(all.data.ratio.2),
+#                                 methods = rep(list.orders, each=17),
+#                                 regions=rep(row_wm_100$names, length(list.orders)),
+#                                 significant = rep( factor(truedata_100$pval<0.2), length(list.orders)))
+# brain.df.all.bias.2$methods <- factor(brain.df.all.bias.2$methods, levels=rev(list.orders))
+# brain.df.all.new.2 <- data.frame(sd.ratio = unlist(all.data.ratio.2),
+#                                 methods =rep(list.orders.new, each=nrow(row_wm_100)),
+#                                 regions=rep(row_wm_100$names, length(list.orders.new)),
+#                                phenotype=rep(c("Without","Without", "Without", "With"), each=nrow(row_wm_100)))
+# brain.df.all.new.2$methods <- factor(brain.df.all.new.2$methods, levels=c("Synthesis", "Simple", "Complete"))
+# brain.df.all.new.2$phenotype <- factor(brain.df.all.new.2$phenotype , levels=c("With", "Without"))
+# 
+# # Create a complete data frame with all combinations
+# brain.df.all.new.2 <- brain.df.all.new.2 %>%
+#   complete(methods, phenotype, regions)
+# 
+# p2_new <- ggplot(brain.df.all.new.2)+
+#   geom_bar(stat="identity",aes(y=sd.ratio, x=methods, fill=phenotype), width=0.45, alpha=0.7, position=position_dodge())+
+#   geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+#   guides(fill = guide_legend(override.aes = list(width = NA)))+
+#    scale_fill_manual(values = custom_colors) + 
+#   theme_minimal()+ggtitle(paste0("Standard Error Estimation Accuracy (with complete data)"))+
+#   facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of Standard Deviation")+ theme(axis.text.x = element_text(angle = 30, hjust=0.7))
+# 
+# p2_new
+```
+
+```{r fig.height=6, fig.width=10, eval=FALSE}
+# plot numerator demoninator separately
+numerator <- do.call(c, all.data.se.mean)
+denominator <- do.call(c, all.data.est.se)
+
+plot.sep <- data.frame(regions = rep(names(all.data.se.mean[[1]])),
+                        values = c(numerator, denominator),
+                        type = rep(c("mean_se", "se_mean"), each=(17*length(all.data.se.mean))),
+                        method = rep(rep(names(all.data.se.mean), each=17), 2))
+plot.sep$method <- factor(plot.sep$method, levels=rev(list.orders))
+ggplot(plot.sep)+
+  geom_bar(stat="identity", aes(values, method, fill = type), alpha=0.7, position=position_dodge(), width=0.5)+
+  theme_minimal()+ggtitle(paste0("Standard error estimation accuracy"))+
+  facet_wrap(~regions, nrow=5)
+```
+
+## Figure 3: Relative efficiency
+
+This is fraction of
+
+1.  Numerator $$
+      \sqrt{\frac1B\sum^B_{b=1}(\hat\theta^b_{Imp}-\theta)^2}
+      $$
+2.  Denominator $$
+      \sqrt{\frac1B\sum^B_{b=1}(\hat\theta^b-\theta)^2}
+      $$
+
+```{r fig.height=6, fig.width=10}
+# brain.df.ratio <- data.frame(sd.ratio = unlist(all.data.ratio.3),
+#                                 methods = rep(list.orders, each=nrow(row_wm_100)),
+#                                 regions=rep(row_wm_100$names, length(list.orders)),
+#                              significant =rep( factor(truedata_100$pval<0.2), length(list.orders)))
+# brain.df.ratio$methods <- factor(brain.df.ratio$methods, levels=rev(list.orders))
+# p3_old <- ggplot(brain.df.ratio)+
+#   geom_bar(stat="identity",aes(sd.ratio, methods, fill=significant), alpha=0.7, position=position_dodge(), width=0.5)+
+#   geom_vline(xintercept = 1, linetype=3, alpha=0.6)+
+#   theme_minimal()+ggtitle("Relative MSE (v.s. full data estimator)")+
+#   facet_wrap(~regions, nrow=5, scales = "free_x")+ labs(fill="p.val < 0.2")
+# p3_old
+
+
+brain.df.ratio.new <- data.frame(sd.ratio = unlist(all.data.ratio.3),
+                                methods =rep(list.orders.new, each=nrow(row_wm_100)),
+                                regions=rep(row_wm_100$names, length(list.orders.new)))
+brain.df.ratio.new$methods <- factor(brain.df.ratio.new$methods, levels=list.orders.new)
+
+p3_new <- ggplot(brain.df.ratio.new)+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill = "#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+  geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+  guides(fill = guide_legend(override.aes = list(width = NA)))+
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Relative RMSE (v.s. full data estimator)"))+
+  facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of RMSE")
+p3_new
+
+# # with complete data
+# 
+# brain.df.ratio.new <- data.frame(sd.ratio = unlist(all.data.ratio.3),
+#                                 methods =rep(list.orders.new, each=nrow(row_wm_100)),
+#                                 regions=rep(row_wm_100$names, length(list.orders.new)),
+#                                phenotype=rep(c("Without", "Without", "Without", "With"), each=nrow(row_wm_100)))
+# brain.df.ratio.new$methods <- factor(brain.df.ratio.new $methods, levels=c("Synthesis", "Simple", "Complete"))
+# brain.df.ratio.new$phenotype <- factor(brain.df.ratio.new $phenotype , levels=c("With", "Without"))
+# brain.df.ratio.new <- brain.df.ratio.new %>%
+#   complete(methods, phenotype, regions)
+# 
+# p3_new <- ggplot(brain.df.ratio.new)+
+#   geom_bar(stat="identity",aes(y=sd.ratio, x=methods, fill=phenotype), width=0.45, alpha=0.7, position=position_dodge())+
+#   geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+#   guides(fill = guide_legend(override.aes = list(width = NA)))+
+#    scale_fill_manual(values = custom_colors) +
+#   theme_minimal()+ggtitle(paste0("Relative RMSE (v.s. full data estimator) with complete data"))+
+#   facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of RMSE")+ theme(axis.text.x = element_text(angle = 30, hjust=0.7))
+# p3_new
+```
+
+
+## Figure 4: coverage
+
+coverage
+
+This is the percentage number of times that the confidence interval of the estimator catches the true estimator $\theta$, out of $B$ bootstrap simulations. The confidence interval standard deviation is generated with GEE parameter SEs and rubin's rule.
+
+In each simulation, coverage is considered:
+$$
+     \hat\theta^b_{Imp}-sd*1.96<\theta<\hat\theta^b_{Imp}+sd*1.96
+$$
+assuming the t-stats is 1.96. It can be written as
+
+$$
+     -sd*1.96<\theta-\hat\theta^b_{Imp}<sd*1.96
+$$
+which is 
+
+$$ |\theta-\hat\theta^b_{Imp}|<sd*1.96$$
+
+```{r fig.height=6, fig.width=10}
+# brain.df.ratio.4 <- data.frame(sd.ratio = unlist(all.data.coverage.perc),
+#                              methods = rep(list.orders.new, each=17),
+#                              regions=rep(row_wm_100$names, length(list.orders)))
+# brain.df.ratio.4$methods <- factor(brain.df.ratio.4$methods, levels=list.orders.new)
+# p4_old <- ggplot(brain.df.ratio.4)+
+#   geom_bar(stat="identity",aes(sd.ratio, methods, fill=significant), alpha=0.7, position=position_dodge(), width=0.5)+
+#   geom_vline(xintercept = 0.95, linetype=3, alpha=0.6)+
+#   theme_minimal()+ggtitle("Coverage of 95% CI")+
+#   facet_wrap(~regions, nrow=3)+labs(fill="p.val < 0.2")
+# p4_old
+
+
+brain.df.ratio.new.4 <- data.frame(sd.ratio = unlist(all.data.coverage.perc),
+                                methods =rep(list.orders.new, each=nrow(row_wm_100)),
+                                regions=rep(row_wm_100$names, length(list.orders.new)))
+brain.df.ratio.new.4$methods <- factor(brain.df.ratio.new.4$methods, levels=list.orders.new)
+
+p4_new <- ggplot(brain.df.ratio.new.4)+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill = "#5D7A96",  width=0.45, alpha=0.7, position=position_dodge())+
+  geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), color="forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name=NULL) +
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Coverage of 95% CI"))+
+  facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Coverage")
+p4_new
+```
+
+# Figure 1 Sub figure
+
+```{r fig.height=8, fig.width=15}
+FA_synth_region <- readRDS("/media/disk2/beijing_dti/Neuroimaging/FA_synth_region.rds")
+testt_subject_data <- read.csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv")
+synth.data <- FA_synth_region
+regions <- synth.data[[1]]$names
+synth.data.all <- data.frame(do.call(rbind,lapply(synth.data, "[[", "values")))
+names(synth.data.all) <- regions
+synth.data.all$Sex <- testt_subject_data$Sex
+synth.data.all$Age <- testt_subject_data$Age
+
+
+# pval.df$pval <- ifelse(pval.df$pval<0.05, as.character(round(pval.df$pval, 4)), " ")
+
+FA_truth_region <- readRDS("/media/disk2/beijing_dti/Neuroimaging/FA_truth_region.rds")
+truth.data <- FA_truth_region
+regions <- truth.data[[1]]$names
+truth.data.all <- data.frame(do.call(rbind,lapply(truth.data, "[[", "values")))
+names(truth.data.all) <- regions
+truth.data.all$Sex <- testt_subject_data$Sex
+truth.data.all$Age <- testt_subject_data$Age
+
+truth.data.all$ID <- synth.data.all$ID <- testt_subject_data$NewID
+
+# t.test results
+truthp <- synthp <- c()
+for (regioni in regions){
+  male.region <- truth.data.all[[regioni]][synth.data.all$Sex=="M"]
+  female.region <- truth.data.all[[regioni]][synth.data.all$Sex=="F"]
+  test.res <- t.test(x=male.region, y=female.region)
+  truthp <- c(truthp, test.res$p.value)
+  
+  male.region <- synth.data.all[[regioni]][synth.data.all$Sex=="M"]
+  female.region <- synth.data.all[[regioni]][synth.data.all$Sex=="F"]
+  test.res <- t.test(x=male.region, y=female.region)
+  synthp <- c(synthp, test.res$p.value)
+}
+pval.df <- data.frame(region = rep(regions, 2),
+                      pval = c(truthp, synthp),
+                      type = rep(c("truth", "synth"), each=length(regions)))
+
+fig.df.synth <- reshape2::melt(synth.data.all, id.vars=c("Sex", "Age", "ID"), variable.name="region")
+fig.df.truth <- reshape2::melt(truth.data.all, id.vars=c("Sex", "Age", "ID"),  variable.name="region")
+
+fig.df.synth$type <- "synth"
+fig.df.truth$type <- "truth"
+
+fig.df <- rbind(fig.df.synth, fig.df.truth)
+
+ggplot() +
+  geom_boxplot(data = fig.df, aes(x=type, y=value, fill=Sex), alpha=0.7)+
+  geom_text(aes(x = type, y = 0.8, label = pval), data = pval.df, color="red") +
+  theme_pubclean()+ggtitle("Neuroimaging regions means comparison")+
+  facet_wrap(~region, scales = "free")
+```
+
+```{r fig.height=2.5, fig.width=6.3}
+fig.df$type <- factor(fig.df$type, levels=c("truth", "synth"), labels = c("Truth", "Synthesized"))
+fig.df$Sex <- factor(fig.df$Sex)
+
+regions.plot <- c("Cingulum_cingulate_gyrus", "Middle_temporal_wm", "Splenium_of_corpus_callosum")
+fig.plot.df <- subset(fig.df, region %in% regions.plot)
+fig.plot.df$region <- ifelse(fig.plot.df$region=="Cingulum_cingulate_gyrus", "Cingulum Cingulate Gyrus",
+                         ifelse(fig.plot.df$region=="Middle_temporal_wm", "Middle Temporal","Splenium of Corpus Callosum"))
+fig.plot.df$ID <- factor(fig.plot.df$ID)
+
+p.val.plot <- subset(pval.df, region %in% regions.plot)
+p.val.plot$type <- factor(p.val.plot$type, levels=c("truth", "synth"), labels = c("Truth", "Synthesized"))
+p.val.plot$region <- ifelse(p.val.plot$region=="Cingulum_cingulate_gyrus", "Cingulum Cingulate Gyrus",
+                         ifelse(p.val.plot$region=="Middle_temporal_wm", "Middle Temporal","Splenium of Corpus Callosum"))
+p.val.plot$y <- c(0.61, 0.69, 0.79, 0.54, 0.55, 0.69)
+p.val.plot$pval <- round(p.val.plot$pval, 3)
+p.val.plot$significant <- ifelse(p.val.plot$pval<0.05, "Yes", "No")
+p.val.plot$pval <- paste("p =", as.character(p.val.plot$pval))
+
+ggplot() +
+geom_boxplot(data = fig.plot.df, aes(x=type, y=value, fill=Sex), alpha=0.2, color="grey50")+
+geom_jitter(data=subset(fig.plot.df, ID %in% c(21,50)), aes(x=type, y=value, fill=Sex, shape=factor(ID)),
+color="black", size=2, stroke=0.5,
+position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7))+
+scale_fill_manual(values = c("F" = "#FF7F7F", "M" = "#7FB3D3")) +
+scale_shape_manual(labels=c("01", "02"),values = c("21" = 24, "50" = 21), name = "ID") +
+guides(fill = guide_legend(override.aes = list(shape = NA)),  # Remove shape from Sex legend
+shape = guide_legend(override.aes = list(fill = c("#7FB3D3", "#FF7F7F"), color = "black", size = 3))) +  
+new_scale_color() +
+geom_text(aes(x = type, y = y, label = pval, color=significant), data = p.val.plot, size=2.5, show.legend = FALSE) +
+scale_color_manual(values = c("Yes"="#2E8B57", "No"="#B0B0B0"), name = "p =") +
+theme_pubclean(base_size=8)+theme(legend.position = "bottom")+
+facet_wrap(~region, nrow=1, scales = "free")+xlab("")+ylab("Region Mean of FA")
+ggsave("/home/xiongj3/ImImp/fig1b.png",width=1600, height=750,dpi=300, units="px")
+```
+
+```{r fig.height=10}
+ggplot() +
+geom_boxplot(data = fig.df, aes(x=type, y=value, fill=Sex), alpha=0.2, color="grey50")+
+scale_fill_manual(values = c("F" = "#FF7F7F", "M" = "#7FB3D3"))+
+theme_pubclean(base_size=12)+theme(legend.position = "bottom")+
+facet_wrap(~region, nrow=3, scales = "free")+xlab("")+ylab("Region Mean of FA")
+```
+
+# Figure 3
+
+```{r fig.height=9, fig.width=7}
+regions.plot <- c("Cingulum\nCingulate Gyrus", "Middle Temporal", "Splenium of\nCorpus Callosum")
+
+p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot))+
+  geom_point(aes(y=bias.mean, x=methods), color = "#5D7A96", alpha=0.7, position=position_dodge(.9))+ scale_y_continuous(n.breaks = 3)+ 
+  geom_hline(aes(yintercept=Estimate, linetype="True Parameter"), data=subset(truedata_100, regions %in% regions.plot), color="forestgreen", alpha=0.8)+
+    scale_linetype_manual(values = c("True Parameter" = "dashed"),name = NULL) +
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1), 
+                          legend.position = "top",
+                          legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))+
+  ggtitle(paste0("Expected Value of Sex Group Difference"))+ylab("Difference in Region Mean")+
+  facet_wrap(~regions, nrow=1, scales = "free_y")
+
+p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    guides(fill = guide_legend(override.aes = list(width = NA)))+
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Standard Error Estimation Accuracy"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Ratio of Standard Error")
+
+p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    guides(fill = guide_legend(override.aes = list(width = NA)))+
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Relative RMSE (v.s. full data estimator)"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs( x="Methods", y="Ratio of RMSE")
+
+p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), color="forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name=NULL) +
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1), 
+                          legend.position = "top",
+                          legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))+
+  ggtitle(paste0("Coverage of 95% CI"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Coverage")
+
+ggarrange(p1_new_f3, p2_new_f3, p3_new_f3, p4_new_f3, nrow=4)
+```
+
+# presentation figure
+
+```{r fig.width=10, fig.height=7}
+regions.plot <- c("Middle Temporal")
+p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot ))+
+  geom_point(aes(y=bias.mean, x=methods),size=2, color = "#5D7A96", alpha=0.7, position=position_dodge(.9))+ scale_y_continuous(n.breaks = 3)+ 
+  geom_hline(aes(yintercept=Estimate, linetype="True Parameter"), data=subset(truedata_100, regions %in% regions.plot), color="forestgreen", alpha=0.8)+
+    scale_linetype_manual(values = c("True Parameter" = "dashed"),name = NULL) +
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1), 
+                          legend.position = "top",
+                          legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))+
+  ggtitle(paste0("Expected Value of Sex Group Difference"))+ylab("Difference in Region Mean")+
+  facet_wrap(~regions, nrow=1, scales = "free_y")
+
+p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    guides(fill = guide_legend(override.aes = list(width = NA)))+
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Standard Error Estimation Accuracy"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Ratio of Standard Error")
+
+p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    guides(fill = guide_legend(override.aes = list(width = NA)))+
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Relative RMSE (v.s. full data estimator)"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs( x="Methods", y="Ratio of RMSE")
+
+p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot))+
+  geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), color="forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name=NULL) +
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1), 
+                          legend.position = "top",
+                          legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))+
+  ggtitle(paste0("Coverage of 95% CI"))+
+    facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Coverage")
+
+ggarrange(p1_new_f3, p2_new_f3, p3_new_f3, p4_new_f3, nrow=2, ncol=2)
+```
+
