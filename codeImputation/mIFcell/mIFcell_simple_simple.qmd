@@ -1,0 +1,626 @@
+---
+title: "mIF analysis cell level (simple ver.)"
+author: "Ruby Xiong"
+format: 
+  html:
+    embed-resources: true
+    theme:
+      - flatly
+    toc: true
+    code-fold: true
+    code-tools: true
+editor: source
+---
+
+```{r}
+library(dplyr)
+library(gee)
+library(sandwich)
+source("~/ImageImputation/dfCalc.R")
+```
+
+```{r}
+createFoldData <- function(dat=dataSchurch, slideTrain=slideTrain, marker="MUC5AC"){
+  # normalized expression name in the dataset
+  nzmarkername <- paste("nzNorm", marker, sep="_")
+  #define predictor and response variables in testing set. Use the common markers for all 3 batches as the prediction variables
+  commons_regress <- nzNormedMarkers[nzNormedMarkers!=nzmarkername]
+  HTA_train1 <- as.matrix(dat[dat$File.Name%in%slideTrain,commons_regress])
+  # Need to code tissue type and tumor (binary) as discrete numbers to run XGBoost
+  HTA_train2 <- cbind(HTA_train1, dat[dat$File.Name%in%slideTrain,"groups"])
+  HTA_train_marker <- dat[dat$File.Name%in%slideTrain, nzmarkername]
+  file.name <- dat[dat$File.Name%in%slideTrain, "File.Name"]
+  return(list(HTA_train1, HTA_train2, HTA_train_marker, 
+              dat_original = dat[dat$File.Name%in%slideTrain, ],
+              File.Name = file.name))
+}
+load("~/ImageImputation/nzNormedMarkers.RData")
+dataSchurch <- read.csv("~/ImageImputation/dataSchurchLite.csv")
+```
+
+```{r}
+# pre-split test and train slides
+# run this function through all markers 
+set.seed(1)
+# create train and test slides
+all.files <-  unique(dataSchurch$File.Name)
+trainSlide <- sample(all.files, round(length(all.files)/2))
+testSlide <- setdiff(all.files, trainSlide)
+slide.split <- list(trainSlide, testSlide)
+# save split
+saveRDS(slide.split, file="/home/xiongj3/ImImp/codeImputation/mIFcellSimple/slideSplit.rds")
+```
+
+```{r}
+slide.split <- readRDS("~/ImImp/codeImputation/mIFcellSimple/slideSplit.rds")
+trainSlide <- slide.split[[1]]
+testSlide <- slide.split[[2]]
+# dataSchurch <- dataSchurch[,nzNormedMarkers]
+
+extract_quantile <- function(xlist){
+  lapply(xlist, function(x)quantile(x, c(0.9, 0.95, 0.99)))
+}
+imputation <- function(marker="CD20", trainSlides=trainSlide, testSlides=testSlide,
+  dataset=dataSchurch, DIR="/home/xiongj3/ImImp/codeImputation/mIFcellSimple", phenotype=TRUE){
+  set.seed(123)
+  DIR <- path.expand(DIR)
+  trainData <- createFoldData(dat=dataset, slideTrain = trainSlides, marker = marker)
+  x_input <- if (phenotype) trainData[[2]] else trainData[[1]]
+  cv_model2 <- glmnet::cv.glmnet(x = x_input, y = trainData[[3]], alpha = 1, nfolds = 5)
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(x = x_input, y = trainData[[3]], alpha = 1, lambda = best_lambda2)
+ 
+  testData <- createFoldData(dat=dataset, slideTrain = testSlides,marker = marker)
+  Yhat.test <- as.numeric(
+    predict(best_model2, newx = if (phenotype) testData[[2]] else testData[[1]], s = best_lambda2)
+  )
+  # extract quantiles for both truth and synth
+  Yhat_list <- split(Yhat.test, testData[[5]])
+  Yhat_quantiles <- extract_quantile(Yhat_list)
+  mkr_name <- paste0("nzNorm_", marker)
+  Y_list <- split(testData[[3]], testData[[5]])
+  Y_quantiles <- extract_quantile(Y_list)
+
+  if(phenotype){
+      saveRDS(Yhat_quantiles, file = file.path(DIR, paste0("synthpheno", marker, ".rds")))
+  } else {
+      saveRDS(Yhat_quantiles, file = file.path(DIR, paste0("synth", marker, ".rds")))
+      saveRDS(Y_quantiles, file = file.path(DIR, paste0("truth", marker, ".rds")))
+  }
+
+}
+markers <- c("CD20","CD38","CD138","CD4", "CD8", "CD68")
+lapply(markers, imputation)
+lapply(markers, imputation, phenotype="FALSE")
+```
+
+```{r}
+# calculate truth
+markers <- c("CD20","CD38","CD138","CD4", "CD8", "CD68")
+truth_list <- list()
+data_meta <- dataSchurch %>%
+dplyr::select(File.Name, patients, groups) %>%
+distinct()
+for(marker in markers){
+  mkr_name <- paste0("nzNorm_", marker)
+  testdata <- subset(dataSchurch, File.Name %in% testSlide)
+  truth_list_data <- split(testdata[, mkr_name], testdata$File.Name)
+  DIR="~/ImImp/codeImputation/mIFcellSimple"
+  quantile.truth <- readRDS(file.path(DIR, paste0("truth", marker, ".rds")))
+  quantile.truth <- dplyr::bind_rows(quantile.truth, .id = "File.Name")
+  colnames(quantile.truth)[2:4] <- c("q90", "q95", "q99")
+
+  quantile.truth <- left_join(x=quantile.truth, y=data_meta, by="File.Name")
+  res_list <- list()
+  for(type.i in c("q90", "q95", "q99")){
+    res.df <- data.frame(values = quantile.truth[,type.i],
+                         quantile.truth[,c("patients", "groups")])
+    names(res.df)[1] <- "values"
+    m0 <- lm(values ~ groups, data=res.df)
+    estimate <- m0$coefficients[2]
+    stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+    res_list[[type.i]] <- data.frame(coef = estimate, sd = stdError, type = type.i)
+  }
+  truth_list[[marker]] <- do.call(rbind, res_list)
+}
+saveRDS(truth_list, "~/ImImp/codeImputation/mIFcellSimple/truth_list.rds")
+```
+
+
+```{r}
+truth_list <- readRDS("~/ImImp/codeImputation/mIFcellSimple/truth_list.rds")
+# write & save test df
+test.ID.df <- dataSchurch[dataSchurch$File.Name %in% testSlide,c("File.Name", "groups", "patients")]
+test.ID.df <- test.ID.df %>%
+  dplyr::select(File.Name,patients, groups) %>%
+  distinct()
+imp.order <- names(readRDS("~/ImImp/codeImputation/mIFcellSimple/truthCD68.rds"))
+test.ID.df <- test.ID.df[match(imp.order, test.ID.df$File.Name),]
+saveRDS(test.ID.df , "~/ImImp/codeImputation/mIFcellSimple/test.ID.df.rds")
+marker_imputation <- function(marker, seed.i=1, n.imp = 10, phenotype=TRUE,
+                              DIR="~/ImImp/codeImputation/mIFcellSimple"){
+  ## split data into calibration and testing
+  # read calibration and testing split
+  test.ID.df <- readRDS("~/ImImp/codeImputation/mIFcellSimple/test.ID.df.rds")
+  # read data
+  if(phenotype){
+    data.marker <- readRDS(file.path(DIR, paste0("synthpheno", marker, ".rds")))
+  } else {
+    data.marker <- readRDS(file.path(DIR, paste0("synth", marker, ".rds")))
+  }
+  data.truth <- readRDS(file.path(DIR, paste0("truth", marker, ".rds")))
+  ## bootstrap
+  ## calibration/test split: sample tissue
+  sample.size <- 200
+  set.seed(seed.i)
+  all.patients <- sample(1:length(data.marker), sample.size, replace = TRUE)
+  calib.patients <- all.patients[1:(sample.size/2)]
+  test.patients <- all.patients[(sample.size/2+1): sample.size]
+  
+  ## assemble calibration and testing data
+  calib_data_list <- data.marker[calib.patients]
+  calib_truth_list <- data.truth[calib.patients]
+  test_data_list <- data.marker[test.patients]
+  test_truth_list <- data.truth[test.patients]
+  calib.ID.df.new <- test.ID.df[calib.patients, ]
+  test.ID.df.new <- test.ID.df[test.patients, ]
+
+  # extract: truth & synth, calibration 
+  calib_data_synth <- do.call(rbind, calib_data_list)
+  calib_data_truth <- do.call(rbind, calib_truth_list)
+  # extract: synth, test
+  test_data_synth <- do.call(rbind, test_data_list)
+  test_data_truth <- do.call(rbind, test_truth_list)
+  # take diff
+  empirical_error <- calib_data_truth - calib_data_synth
+  
+  colnames(calib_data_truth) <- colnames(calib_data_synth) <- 
+    colnames(test_data_synth) <- colnames(test_data_truth) <- c("q90", "q95", "q99")
+
+  # check
+  # calib_compare <- data.frame(truth90 = calib_data_truth[,"q90"],
+  #                             synth90 = calib_data_synth[,"q90"],
+  #                             test.ID.df[calib.patient, c("status", "tissue.1", "patient")])
+  # sample calibration error
+  imputed_list <- list()
+  for (i in 1:n.imp){
+    if(phenotype){
+      tissues <- calib.ID.df.new$groups
+      tissues_test <- test.ID.df.new$groups
+      empirical.CLR.idx <- which(tissues == 1)
+      empirical.DII.idx <- which(tissues == 2)
+      sample_idx <- rep(NA, nrow(test_data_synth))
+      sample_idx[which(tissues_test==1)] <- sample(empirical.CLR.idx, 
+                                                      sum(tissues_test==1), 
+                                                      replace = TRUE)
+      
+      sample_idx[which(tissues_test==2)] <- sample(empirical.DII.idx, 
+                                                      sum(tissues_test==2),
+                                                      replace = TRUE)
+      
+    }else{
+      sample_idx <- sample(1:nrow(empirical_error), nrow(test_data_synth), replace = TRUE)
+      
+    }
+    error_sampled <- empirical_error[sample_idx,]
+    imputed <- data.frame(test_data_synth + error_sampled)
+    names(imputed) <- colnames(calib_data_truth)
+    
+    res_list <- list()
+    for(type.i in names(imputed)){
+      ## calibration data frame and test data frame rbind()
+      imputed_i_df <- data.frame(values = c(calib_data_truth[,type.i], imputed[[type.i]]),
+                                 rbind(calib.ID.df.new[, c("groups", "patients")],test.ID.df.new[, c("groups", "patients")] ))
+      m0 <- lm(values ~ groups, data=imputed_i_df)
+      estimate <- m0$coefficients[2]
+      stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+      res_list[[type.i]] <- data.frame(coef = estimate, sd = stdError, type = type.i)
+    }
+    res_list <- do.call(rbind, res_list)
+    imputed_list[[i]] <- res_list
+  }
+  imputed_list <- do.call(rbind, imputed_list)
+  ## Rubin's rule
+  # extract patient outcome
+  type_output <- list()
+  for(i in c("q90", "q95", "q99")){
+    imputed_i_list <- subset(imputed_list, type==i)
+    type_output[[i]] <- rubin_imp_calc(imputed_i_list)
+  }
+  type_output_df <- do.call(rbind, type_output)
+  
+  # mean imputation, complete and truth btsp
+  # with no phenotype 
+  
+  if(!phenotype){
+    truth_list <- meanres_list <- complete_list <- list()
+    for(type.i in colnames(calib_data_truth)){
+        truth_df <- data.frame(values = c(calib_data_truth[,type.i], test_data_truth[,type.i]),
+                                   rbind(calib.ID.df.new[, c("groups", "patients")],test.ID.df.new[, c("groups", "patients")] ))
+        m0 <- lm(values ~ groups, data=truth_df)
+        estimate <- m0$coefficients[2]
+        stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+        truth_list[[type.i]] <-  data.frame(coef = estimate, sd = stdError, type = type.i)
+        
+        meanres_df <- data.frame(values = c(calib_data_truth[,type.i], test_data_synth[,type.i]),
+                                   rbind(calib.ID.df.new[, c("groups", "patients")],test.ID.df.new[, c("groups", "patients")] ))
+        m0 <- lm(values ~ groups, data=meanres_df)
+        estimate <- m0$coefficients[2]
+        stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+        meanres_list[[type.i]] <-  data.frame(coef = estimate, sd = stdError, type = type.i)
+        
+        complete_df <- data.frame(values = c(calib_data_truth[,type.i]), calib.ID.df.new[1:100, c("groups", "patients")])
+        m0 <- lm(values ~ groups, data=complete_df)
+        estimate <- m0$coefficients[2]
+        stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+        complete_list[[type.i]] <-  data.frame(coef = estimate, sd = stdError, type = type.i)
+    }
+    res_list_df <- do.call(rbind, meanres_list)
+    truth_list_df <- do.call(rbind, truth_list)
+    complete_list_df <- do.call(rbind, complete_list)
+    type_output_df <- list(meanImp= res_list_df, truthImp = truth_list_df, complete = complete_list_df, multiImp = type_output_df)
+  }
+  
+  return(type_output_df)
+}
+
+## Rubin's rule function (for one type tissue, and for one summary data type)
+rubin_imp_calc <- function(list.df, sample.size = 200){
+  n.imp <- nrow(list.df)
+  # rubin's rule calculation
+  means <- list.df[["coef"]]
+  ses <- list.df[["sd"]]
+  VARB <- var(means)
+  vars <- sqrt(var(means)*(n.imp+1)/n.imp+mean(ses^2))
+  stats <- qt(0.975, dfCalc(VARB, vars, n.imp , sample.size, 2))
+  return(data.frame(coef=mean(means), sd=vars, stats=stats, type = list.df$type[1]))
+}
+# debug(marker_imputation)
+marker_imputation("CD68", 12)
+```
+
+```{r}
+# repeat the same mean_imputation for 200 simulations
+## format result data
+# Define the function to run for each seed
+run_imputation_mkr <- function(seed_i) {
+  markers <- c("CD20","CD38","CD138","CD4", "CD8", "CD68")
+  mkr.truth <- mkr.mean <- mkr.multi <- mkr.strat <- mkr.complete <- list()
+  for(mkr in markers){
+    res.mean <-  marker_imputation(marker = mkr, seed.i = seed_i, phenotype = FALSE, n.imp = 10)
+    mkr.multi[[mkr]] <- res.mean[["multiImp"]]
+    mkr.truth[[mkr]] <- res.mean[["truthImp"]]
+    mkr.mean[[mkr]] <-  res.mean[["meanImp"]]
+    mkr.complete[[mkr]] <-  res.mean[["complete"]]
+    
+    mkr.strat[[mkr]] <-  marker_imputation(marker = mkr, seed.i = seed_i, phenotype = TRUE, n.imp = 10)
+  }
+  out.list <- list(mkr.truth, mkr.mean, mkr.complete, mkr.multi, mkr.strat)
+  saveRDS(out.list, file=file.path("~/ImImp/codeImputation/mIFcellSimple/res", paste0("impres", seed_i,".rds")))
+}
+start.time <- Sys.time()
+run_imputation_mkr(1)
+Sys.time() - start.time
+``` 
+
+```{r}
+## Run this
+res.list.marker <- mclapply(1:500, run_imputation_mkr, mc.cores = 20, mc.preschedule = FALSE)  # Adjust based on total cores
+```
+
+# Figures
+```{r fig.height=6, fig.width=12}
+  library(purrr)
+markers <- c("CD20","CD38","CD138","CD4", "CD8", "CD68")
+root_dir="~/ImImp/codeImputation/mIFcellSimple/res"
+  full.metric <- btsp.metric <- btsp.true <- true.param <- metric.list <- list()
+  methods.order <- c("btsp", "Synthesis", "Complete", "MultiSynth", "PAMS")
+  for(rep.i in 1:500){
+      metric.list[[rep.i]] <- readRDS(file.path(root_dir, paste0("impres", rep.i,".rds")))
+  }
+  truth_list <- readRDS("~/ImImp/codeImputation/mIFcellSimple/truth_list.rds")
+  truth_list <- dplyr::bind_rows(truth_list, .id = "marker")
+  names(truth_list)[2] <- "truth.mean"
+
+  marker_list <- list()
+  for(marker in markers){
+  # extract marker
+  marker_value <- map(metric.list, function(outer_elem) {
+    map(outer_elem, function(sub_elem) {
+      sub_elem[[marker]]  # get the first sub-sub-element
+    })
+  })
+  marker_value <- lapply(marker_value, function(x){names(x) <- methods.order;return(x)})
+  stacked_df <- imap_dfr(marker_value, function(outer_elem, outer_id) {
+  imap_dfr(outer_elem, function(df, sub_id) {
+    df <- as.data.frame(df)  # in case it's tibble/matrix
+    rownames(df) <- NULL     # remove row names
+    df %>%
+      mutate(sim = outer_id, methods = sub_id)
+  })
+})
+    stacked_df$stats <- ifelse(is.na(stacked_df$stats), 1.96, stacked_df$stats )
+    stacked_df$phenotype <- ifelse(stacked_df$methods=="strat", TRUE, FALSE)
+    marker_list[[marker]] <- stacked_df
+  }
+  
+  
+  
+  # plot 1: bias
+  metric.df.all <- dplyr::bind_rows(marker_list, .id = "marker")
+  metric.df.btsp <- subset(metric.df.all, methods == "btsp")
+  names(metric.df.btsp)[2] <- c("btspmean")
+  # metric.df.all <- subset(metric.df.all, methods != "btsp")
+  
+  metric.df.all <- left_join(metric.df.all, metric.df.btsp[,c("btspmean", "type", "marker", "sim")], by=c("type", "marker", "sim"))
+  metric.df.all <- left_join(metric.df.all, truth_list[,c("truth.mean", "type", "marker")], by=c("type", "marker"))
+  metric.df.all$coverages <- abs(metric.df.all$coef - metric.df.all$truth.mean) < metric.df.all$stats*metric.df.all$sd
+  
+  metric.df.all.bias <-
+    metric.df.all %>% group_by(phenotype, methods, type, marker) %>%
+    reframe(mean.est = mean(coef), se = sd(coef)*(sqrt(499))/500, sd.ratio=mean(sd)/sd(coef),
+            btsp.bias = sqrt(mean((btspmean-truth.mean)^2)), mse.bias=sqrt(mean((coef - truth.mean)^2)),
+            coverage = mean(coverages))
+    metric.df.all.bias$phenotype <- ifelse( metric.df.all.bias$phenotype, "With", "Without")
+    metric.df.all.bias <- subset(metric.df.all.bias, methods != "btsp")
+  metric.df.all.bias$methods <- factor(metric.df.all.bias$methods, levels=c( "Complete", "Synthesis", "MultiSynth", "PAMS"))
+  # colnames(metric.df.all.bias)[5] <- "means"
+  
+  # metric.df.all.bias$methods <- factor(metric.df.all.bias$methods, 
+  #                                      levels=c("bySample", "local", "simple", "mean"),
+  #                                      labels = c("Local\nMultiple", "Local",
+  #                                                 "Simple", "Synthesis"))
+  # metric.df.all.bias$phenotype <- as.logical(metric.df.all.bias$phenotype)
+
+  # p1.vars <- c("quantile", "means", "se", "marker", "methods", "phenotype")
+  # metric.df.all.bias.p1 <- metric.df.all.bias[,p1.vars]
+  # metric.df.all.bias.p1$type <- metric.df.all.bias$phenotype
+  # true.param.all <- do.call(rbind, true.param)
+  custom_colors <- c("With" = "#5D7A96",
+                     "Without" = "#B87D7D")
+  
+  p1 <- ggplot(metric.df.all.bias, aes(x = methods, y = mean.est), color = "#5D7A96") +
+      geom_point(alpha = 0.7, position = position_dodge(0.9)) +
+      geom_hline(data=truth_list, aes(yintercept=truth.mean, linetype="True Parameter"), color="forestgreen")+
+      scale_linetype_manual(values = c("True Parameter" = "dashed"), name=NULL) + labs(linetype = "True Parameter") +
+      facet_wrap(type ~ marker, scales = "free_y", ncol=6) +
+      ggtitle("(a) Expected Value of Group Difference (DII v.s. CLR)") +
+      ylab("Difference in Mean 99th type")+
+      labs(color="Phenotype", x="Methods")+
+      theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+  p1
+  
+  p2 <- ggplot(metric.df.all.bias)+
+    geom_bar(stat="identity",aes(sd.ratio, methods), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(type), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
+    coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Deviation")
+  
+  p2
+  
+  metric.df.all.bias$mse.ratio <- metric.df.all.bias$mse.bias/metric.df.all.bias$btsp.bias
+  p3 <- ggplot(metric.df.all.bias)+
+    geom_bar(stat="identity",aes(mse.ratio, methods), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(type), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype=3, alpha=0.6)+
+    ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")+
+    coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of RMSE")
+  
+  p3
+  
+  p4 <- ggplot(metric.df.all.bias)+
+    geom_bar(stat="identity",aes(methods, coverage), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(type), cols=vars(marker), scales = "free")+
+    xlab("Percentage")+ geom_vline(xintercept = 0, linetype=2, alpha=0.8)+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+               color = "forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+    labs(linetype = "Reference Line") + ggtitle("(d) Coverage of 95% CI")+
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ 
+    labs(fill="Phenotype", x="Methods", y="Coverage")
+  p4
+
+```
+```{r}
+p1
+```
+
+```{r}
+quantiles.list <- lapply(c("truth", "synth","synthpheno"), function(x){
+  quantile.truth <- readRDS(file.path(DIR, paste0(x, "CD138", ".rds")))
+  quantile.truth <- dplyr::bind_rows(quantile.truth, .id = "File.Name")
+  colnames(quantile.truth)[2:4] <- c("q90", "q95", "q99")
+  quantile.truth <- left_join(x=quantile.truth, y=data_meta, by="File.Name")
+  quantile.truth.plot <- reshape2::melt(quantile.truth, id.vars = c("File.Name", "patients", "groups"))
+  return(quantile.truth.plot)
+})
+names(quantiles.list) <- c("truth", "synth","synthpheno")
+all.plot <- dplyr::bind_rows(quantiles.list , .id = "type")
+
+ggplot(all.plot)+geom_jitter(aes(y=value, x=factor(groups), color=type), alpha=0.7)+facet_wrap(~variable)+ggtitle("True and Synthesized Data Plot CD138")+theme_minimal()
+
+```
+
+
+```{r}
+metric.df.all.bias.5 <- subset(metric.df.all.bias, type=="q99")
+## 99th percentile & stack
+  p15 <- ggplot(metric.df.all.bias.5, aes(x = methods, y = mean.est), color = "#5D7A96") +
+      geom_point(alpha = 0.7, position = position_dodge(0.9)) +
+      geom_hline(data=subset(truth_list, type=="q99"), aes(yintercept=truth.mean, linetype="True Parameter"), color="forestgreen")+
+      scale_linetype_manual(values = c("True Parameter" = "dashed"), name=NULL) + labs(linetype = "True Parameter") +
+      facet_wrap(~ marker, scales = "free_y", ncol=6) +
+      ggtitle("(a) Expected Value of Group Difference (DII v.s. CLR)") +
+      ylab("Difference in Mean 99th type")+
+      labs(color="Phenotype", x="Methods")+
+      theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), legend.position = "top",
+            legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+        legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))
+  
+  p25 <- ggplot(metric.df.all.bias.5)+
+    geom_bar(stat="identity",aes(sd.ratio, methods), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_wrap(~marker, scales = "free", ncol=6)+
+    geom_vline(xintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
+    coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Deviation")
+
+  p35 <- ggplot(metric.df.all.bias.5)+
+    geom_bar(stat="identity",aes(mse.ratio, methods), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_wrap(~marker, scales = "free", ncol=6)+
+    geom_vline(xintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")+
+    coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of RMSE")
+
+  p45 <- ggplot(metric.df.all.bias.5)+
+    geom_bar(stat="identity",aes(methods, coverage), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_wrap(~marker, scales = "free", ncol=6)+
+    xlab("Percentage")+ geom_vline(xintercept = 0, linetype=2, alpha=0.8)+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+               color = "forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+    labs(linetype = "Reference Line") + ggtitle("(d) Coverage of 95% CI")+
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), legend.position = "top",
+          legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "pt"),
+          legend.box.margin = margin(-10, -10, -10, -10, unit = "pt"))+ 
+    labs(fill="Phenotype", x="Methods", y="Coverage")
+
+```
+
+```{r fig.height=10, fig.width=12}
+plot5list <- list(p15, p25, p35, p45)
+ggarrange(plotlist = plot5list, ncol=1)
+```
+
+# tissue image
+```{r fig.height=4.5, fig.width=6}
+library(readr)
+library(data.table)
+library(plotly)
+#region001_A, group 1 (CLR)
+markers_normed <- c("nzNorm_CD20", "nzNorm_CD8")
+# plot1
+p1cell <- dataSchurch[, c(markers_normed, "File.Name", "X", "Y")]
+p1cell <- subset(p1cell, File.Name == "reg005_A")
+
+setDT(p1cell)
+p1cell <- data.table::melt(p1cell, 
+               id.vars=c("X","Y", "File.Name"),
+               measure.vars = markers_normed,
+               variable.name = "variable",
+               value.name =  "valuenorm")
+
+p <- ggplot() +
+  geom_point(data = subset(p1cell, variable=="nzNorm_CD20"),
+             aes(X, Y, color = variable, alpha = valuenorm),
+             size = 1, shape = 16) +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+p
+```
+
+```{r}
+createFoldData <- function(dat=dataSchurch, slideTrain=slideTrain, marker="MUC5AC"){
+  # normalized expression name in the dataset
+  nzmarkername <- paste("nzNorm", marker, sep="_")
+  #define predictor and response variables in testing set. Use the common markers for all 3 batches as the prediction variables
+  commons_regress <- nzNormedMarkers[nzNormedMarkers!=nzmarkername]
+  HTA_train1 <- as.matrix(dat[dat$File.Name%in%slideTrain,commons_regress])
+  # Need to code tissue type and tumor (binary) as discrete numbers to run XGBoost
+  HTA_train2 <- cbind(HTA_train1, dat[dat$File.Name%in%slideTrain,"groups"])
+  HTA_train_marker <- dat[dat$File.Name%in%slideTrain, nzmarkername]
+  return(list(HTA_train1, HTA_train2, HTA_train_marker, dat_original = dat[dat$File.Name%in%slideTrain, ]))
+}
+fnms <- unique(dataSchurch$File.Name)
+trainSlides <- trainSlide
+testSlides <- testSlide
+trainData <- createFoldData(dat=dataSchurch,
+  slideTrain = trainSlides,
+  marker = marker)
+```
+
+
+```{r}
+marker = "CD20"
+phenotype <- FALSE
+  cv_model2 <- glmnet:::cv.glmnet(trainData[[1]], trainData[[3]], alpha = 1, nfolds = 5)
+  
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(trainData[[1]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+ 
+  testData <- createFoldData(dat=dataSchurch,
+                    slideTrain = testSlides,
+                    marker = marker)
+
+  Yhat.test <- as.numeric(
+    predict(best_model2, newx = if (phenotype) testData[[2]] else testData[[1]], s = best_lambda2)
+  )
+test.plot <- testData[[4]]
+test.plot$CD20_synth <- Yhat.test
+plot.regions <- c("reg067_A","reg069_A","reg023_B","reg020_B")
+
+ggplot() +
+  geom_point(data=subset(test.plot, File.Name==plot.regions),
+             aes(X, Y, alpha = CD20_synth), color="cyan",
+             size = 1.5, shape = 16) + coord_fixed(ratio = 1)+
+  theme_minimal() + facet_wrap(~File.Name)+
+  theme(panel.grid = element_blank())+ theme_dark()
+
+ggplot() +
+  geom_point(data=subset(test.plot, File.Name==plot.regions),
+             aes(X, Y, alpha = nzNorm_CD20), color="cyan",
+             size = 1.5, shape = 16) + coord_fixed(ratio = 1)+
+  theme_minimal() + facet_wrap(~File.Name)+ scale_alpha("CD20_true")+
+  theme(panel.grid = element_blank())+ theme_dark()
+```
+
+
+```{r}
+marker = "CD8"
+trainData <- createFoldData(dat=dataSchurch,
+  slideTrain = trainSlides,
+  marker = marker)
+phenotype <- FALSE
+  cv_model2 <- glmnet:::cv.glmnet(trainData[[1]], trainData[[3]], alpha = 1, nfolds = 5)
+  
+  best_lambda2 <- cv_model2$lambda.min
+  best_model2 <- glmnet::glmnet(trainData[[1]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+ 
+  testData <- createFoldData(dat=dataSchurch,
+                    slideTrain = testSlides,
+                    marker = marker)
+
+  Yhat.test <- as.numeric(
+    predict(best_model2, newx = if (phenotype) testData[[2]] else testData[[1]], s = best_lambda2)
+  )
+test.plot <- testData[[4]]
+test.plot$CD8_synth <- Yhat.test
+plot.regions <- c("reg067_A","reg069_A","reg023_B","reg020_B")
+
+ggplot() +
+  geom_point(data=subset(test.plot, File.Name==plot.regions),
+             aes(X, Y, alpha = CD8_synth), color="cyan",
+             size = 1.5, shape = 16) + coord_fixed(ratio = 1)+
+  theme_minimal() + facet_wrap(~File.Name)+
+  theme(panel.grid = element_blank())+ theme_dark()
+
+ggplot() +
+  geom_point(data=subset(test.plot, File.Name==plot.regions),
+             aes(X, Y, alpha = nzNorm_CD8), color="cyan",
+             size = 1.5, shape = 16) + coord_fixed(ratio = 1)+
+  theme_minimal() + facet_wrap(~File.Name)+ scale_alpha("CD8_true")+
+  theme(panel.grid = element_blank())+ theme_dark()
+```
+

@@ -1,0 +1,820 @@
+---
+title: "mIF data analysis"
+author: "Ruby Xiong"
+date: "April 16th, 2025"
+toc: true
+format:
+  html:
+    html-math-method: katex
+    code-tools: true
+    self-contained: true
+    code-fold: true
+    code-summary: "Click to show/hide code" 
+execute:
+  warning: false
+lightbox: true
+---
+
+```{r}
+library(knitr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(dplyr)
+library(paletteer)
+library(ggpubr)
+```
+
+# Introduction
+
+The recent paper analyzing this data set is here: [Li, J., Simmons, A.J., Hawkins, C.V. et al. Identification and multimodal characterization of a specialized epithelial cell type associated with Crohn’s disease. Nat Commun 15, 7204 (2024). https://doi.org/10.1038/s41467-024-51580-7](https://www.nature.com/articles/s41467-024-51580-7)
+
+More about dataset is here: [Bao S, Chiron S, Tang Y, et al. A cross-platform informatics system for the Gut Cell Atlas: integrating clinical, anatomical and histological data. Proc SPIE Int Soc Opt Eng. 2021](https://doi.org/10.1117/12.2581074)
+
+![Ascending colon (AC) and terminal ileum](images/clipboard-1111774027.png)
+
+# Data overview
+
+Testing and training patient-wise split:
+
+```{r}
+data_summary <- read.csv("~/ImImp/codeImputation/pixn2n/data_summary.csv")[,1:4]
+kable(table(data_summary$test_train, data_summary$status))
+```
+
+Within training patients, number of tissues each patient and the part of colon:
+
+```{r}
+test.ID.df <- readRDS("~/ImImp/codeImputation/pixn2n/test.ID.df.rds")
+# test.ID.df.old <- test.ID.df
+# saveRDS(test.ID.df.old , "~/ImImp/codeImputation/pixn2n/test.ID.df.old.rds")
+test.ID.df$status <- ifelse(test.ID.df$status=="normal", "inactive", test.ID.df$status)
+saveRDS(test.ID.df, "~/ImImp/codeImputation/pixn2n/test.ID.df.rds")
+kable(t(table(test.ID.df$patient, test.ID.df$tissue.1)))
+```
+
+# Synthesis and data processing steps
+
+```{mermaid}
+flowchart TD
+    classDef boxes color:#708090,fill:#F5F5F580,stroke:#778899,stroke-width:2px
+
+    subgraph Synthesis
+        AA[Raw true TIF]:::boxes --> BB(Normalized true TIF):::boxes
+        BB --> CC[Rescale normalized TIF to 255]:::boxes
+        CC --> DD[Training]:::boxes
+        CC --> EE[Testing]:::boxes
+        DD --> A[Synthesized TIF]:::boxes
+        EE --> A
+        EE --> E[Tissue mask TIF]:::boxes
+    end
+    subgraph Process_Data
+        A --> B(Synthesized Vec):::boxes
+        E --> F(Tissue mask Vec):::boxes
+        B --> G(Synth Vec Tissue):::boxes
+        EE --> H(Norm Vec Tissue):::boxes
+        F --> G
+        F --> H
+        G --> I(Synth Vec Tissue \n Rescaled):::boxes
+        H --> I
+        I --> J{{Synth Tissue \n percentile/mean}}:::boxes
+        H --> K{{Norm Tissue \n percentile/mean}}:::boxes
+    end
+    style Synthesis color:#E0FFFF,fill:#ADD8E6,stroke:#4682B4,stroke-width:3px 
+    style Process_Data color:#708090,fill:#FAF0E6,stroke:#FFA500,stroke-width:3px 
+```
+
+Normalization (python):
+
+``` 
+# Calculate the mean intensity
+mean_intensity = np.mean(img_array[img_array>0])
+# Apply the normalization: log10(1 + raw_intensity / image_mean)
+normalized_array = np.log10(1 + (img_array / mean_intensity))
+```
+
+# Preview: synthesized vs normed truth
+
+Compare the summary statistics (90%/95%/99% quantile, mean)
+
+Scatter plot by marker, putting together all statistics
+
+```{r}
+# read in data
+folders <- c("means", paste0("quantile", c(90, 95, 99)))
+## read all data in the folder
+
+markers <- c('CD11B', 'CD20', 'CD3D', 'CD4', 'CD45', 'CD68', 'CD8', 'CGA',
+             'ERBB2', 'FOXP3', 'LYSOZYME', 'OLFM4', 'PCNA', 'SOX9')
+all.data <- lapply(markers, function(marker0){
+    list_values <- readRDS(paste0("/media/disk2/GCA_norm/tissue_quantiles/", marker0, ".rds"))
+    names(list_values) <- list.files("/media/disk2/GCA_norm_inference_baseline")
+    return(list_values)})
+names(all.data) <- markers
+
+# restructure the data into data frame
+## list structure
+## Categories (4)
+##   -- Markers (14)
+##       -- Individuals (38)
+##           -- Values (synth/truth)
+## columns: value, category (folders), marker, ID, truth/synth
+
+convert_to_dataframe_tidy <- function(marker_data) {
+  imap_dfr(marker_data, function(marker, marker_name) {
+    imap_dfr(marker, function(id, id_name) {
+      # Convert truth/synth to a list of tibbles
+      map_dfr(id, function(vec) {
+        tibble(
+          value = unlist(vec),
+          type = names(vec) %||% seq_along(vec),
+          source = deparse(substitute(vec))  # Gets the name ('truth' or 'synth')
+        )
+      }, .id = "source") %>% 
+        mutate(
+          marker = marker_name,
+          ID = id_name
+        )
+    })
+  }) %>% 
+    dplyr::select(value, type, marker, ID, source)
+}
+
+all.data.df <- convert_to_dataframe_tidy(all.data)
+
+
+
+all.data.df$type <- factor(all.data.df$type, levels = c("", "90%", "95%", "99%"),
+                               labels = c("mean", "q90", "q95", "q99"))
+all.data.df$type <- as.character(all.data.df$type)
+
+all.data.df$source <- ifelse(all.data.df$source=="input", "synth", "truth")
+all.data.df$source <- factor(all.data.df$source)
+
+all.data.df$source <- factor(all.data.df$source)
+
+
+```
+
+```{r fig.height=6, fig.width=9}
+## make plot
+ggplot(data = all.data.df, aes(y=value, x=type, fill=source))+
+  geom_jitter(aes(color=source), alpha=0.2)+
+  facet_wrap(~marker,scale="free_y")+theme_minimal()+
+  ggtitle("Summary statistics of each tissue")
+```
+```{r}
+# calculate truth
+library(nlme)
+
+res_truth_all <- list()
+for(mkr in markers){
+  truth_marker <- list()
+  for (typ in c("mean", "q90", "q95", "q99")){
+     subdata <- subset(all.data.df, type == typ & marker==mkr & source=="truth")
+     subdata <- left_join(subdata, test.ID.df, by="ID")
+     m0 <- lme(value ~ status, data=subdata , random = ~1|patient)
+     coef_m0 <- m0$coefficients$fixed[2]
+     sd_m0 <- sqrt(as.numeric(VarCorr(m0)[2,2]))
+     truth_marker[[typ]] <- data.frame(coef = coef_m0, sd = sd_m0, type = typ, marker=mkr)
+  }
+  res_truth_all[[mkr]] <- truth_marker
+}
+# combine results
+res_truth_all_list <- lapply(res_truth_all, function(listi){do.call(rbind, listi)})
+res_truth_all_df <- do.call(rbind, res_truth_all_list)
+```
+
+# Analysis steps : multiple (stratified) imputation
+
+With quantiles from 38 testing set tissues:
+
+1. Combine normal with inactive, so now there are 13 active and 9 inactive
+2. Bootstrap from 38 to 200
+3. Split 200 tissues into calibration (100) and test (100)
+4. Get empirical error from calibration: error = calibration truth - calibration synth
+5. Sample empirical error (stratified) and add to test synth
+6. rbind() calibration truth and test synth
+7. Linear regression: quantiles ~ tumor status (inactive/active)
+8. repeat 5-7 for 9 more times
+9. use Rubin's rule for the multiple imputation results
+
+
+# Result Analysis
+
+```{r}
+###################################
+######### calculate truth #########
+###################################
+# read data
+results_imp <- readRDS("/media/disk2/GCA_norm/sim_result_m50.rds")
+results_strat <-  readRDS("/media/disk2/GCA_norm/sim_result_strat.rds")
+## split data into calibration and testing
+  # read calibration and testing split
+  test.ID.df <- readRDS("~/ImImp/codeImputation/pixn2n/test.ID.df.rds")
+  test.ID.df$status <- ifelse(test.ID.df$status=="normal", "inactive", test.ID.df$status)
+  # use linear regression model
+truth_list <- list()
+markers <- c('CD11B', 'CD20', 'CD3D', 'CD4', 'CD45', 'CD68', 'CD8', 'CGA', 
+             'ERBB2', 'FOXP3', 'LYSOZYME', 'OLFM4', 'PCNA', 'SOX9')
+for(mkr in markers){  
+  # read data
+  data.marker <- readRDS(paste0("/media/disk2/GCA_norm/tissue_quantiles/", mkr, ".rds"))
+  # extract: truth
+  data_truth <- do.call(rbind, lapply(data.marker, "[[", "ref"))
+  colnames(data_truth) <- c("mean", "q90", "q95", "q99")
+  res_list <- list()
+  for(type.i in colnames(data_truth)){
+    ## calibration data frame and test data frame rbind()
+    imputed_i_df <- data.frame(values = data_truth[,type.i],
+                               test.ID.df[, c("status", "tissue.1", "patient")])
+    # combine status
+    imputed_i_df$status <- ifelse(imputed_i_df$status=="normal", "inactive", imputed_i_df$status)
+    imputed_i_df$status <- factor(imputed_i_df$status, levels=c("inactive", "active"))
+    m0 <- lm(values ~ status, imputed_i_df)
+    coef_sd_m0 <- summary(m0)$coefficients[2,1:2]
+    res_list[[type.i]] <- data.frame(mean = summary(m0)$coefficients[2,1], 
+                               sd = summary(m0)$coefficients[2,2], stats=1.96, type = type.i, marker=mkr)
+  }
+  truth_list[[mkr]] <- do.call(rbind, res_list)
+}
+truth_df <- do.call(rbind, truth_list)
+# saveRDS(truth_df, "/media/disk2/GCA_norm/sim_truth.rds")
+```
+
+## Figure 1: bias
+
+Bias of the estimator This plot is a point&bar plot, where:
+
+1.  the point: the mean bias across all bootstrap simulations: $$
+      \hat{Bias}(\theta_{syn})=\frac1B\sum(\hat\theta^b_{syn}-\theta)
+      $$
+2.  The standard deviation times 1.96 $$
+      s = \frac{1}{B}\sqrt{\sum_{b=1}^B(\theta^b_{syn}-\frac{\sum\hat\theta^b_{syn}}B)^2}
+      $$
+
+```{r, fig.width=18}
+# Combine results 
+res.list.marker <- readRDS("/media/disk2/GCA_norm/sim_result_m50.rds")
+truth_df <- readRDS("/media/disk2/GCA_norm/sim_truth.rds")
+# extract mean into matrix: lapply this function to the 500 simulations
+extract_mean <- function(listi){
+  simi <- list()
+  for(simType in 1:length(listi)){
+    means.df <- do.call(rbind, listi[[simType]])
+    means.df$marker <- rep(names(listi[[simType]]), each=4)
+    simi[[simType]] <- means.df
+  }
+  simi.df <- do.call(rbind, simi)
+  simi.df$simType <- rep(c("Truth", "Synthesis", "Complete", "MultSynth", "PAMS"), each=nrow(simi[[1]]))
+  return(simi.df)
+}
+res.df.marker <- lapply(res.list.marker, extract_mean)
+res.df.all <- do.call(rbind, res.df.marker)
+
+# calculate estimate and sd with dplyr
+res.df.all.imp <- subset(res.df.all, simType != "Truth")
+# res.df.all.imp$methods <- ifelse(res.df.all.imp$simType == "SimpleStrat", "Simple", res.df.all.imp$simType)
+# res.df.all.imp$phenotype <- ifelse(res.df.all.imp$simType == "SimpleStrat", "With", "Without")
+res.df.all.imp$type <- factor(res.df.all.imp$type, levels = c("mean", "q90", "q95", "q99"),
+                              labels=c("Mean", "90th Quantile", "95th Quantile", "99th Quantile"))
+plot1.df <- res.df.all.imp %>% group_by(marker, type, simType) %>% 
+  reframe(estimates = mean(mean), sd.mean = sd(mean)*sqrt(499/(500^2)))
+
+# truth_df <- readRDS("/media/disk2/GCA_norm/sim_truth.rds")
+# plot1.df <- left_join(plot1.df, truth_df, by=c("type", "marker"))
+# plot1.df$bias <- plot1.df$estimates - plot1.df$mean
+data_truth_df <- data.frame(marker = truth_df$marker,
+                            type = truth_df$type,
+                            simType = "Truth",
+                            estimates = truth_df$mean,
+                            `sd.mean` = truth_df$sd)
+data_truth_df$type <- factor(data_truth_df$type, levels = c("mean", "q90", "q95", "q99"),
+                              labels=c("Mean", "90th Quantile", "95th Quantile", "99th Quantile"))
+truth_df$type <- factor(truth_df$type, levels = c("mean", "q90", "q95", "q99"),
+                              labels=c("Mean", "90th Quantile", "95th Quantile", "99th Quantile"))
+# p1 <- ggplot(plot1.df)+
+#     geom_errorbar(aes(ymin=estimates-1.96*sd.mean, ymax=estimates+1.96*sd.mean, x=methods, color=phenotype), width=.2, position=position_dodge(.9)) +
+#     geom_point(aes(y=estimates, x=methods, color=simType), alpha=0.7, position=position_dodge(.9))+
+#   facet_wrap(type~marker, scales = "free_y", ncol=7)+
+#     geom_hline(aes(yintercept=estimates), data = data_truth_df, linetype=3, alpha=0.6)+theme_minimal()+
+#   ggtitle(paste0("Parameter Estimated Across Simulations"))+xlab("Bias")+scale_color_manual(values = custom_colors)
+# p1
+```
+
+```{r fig.width=15, fig.height=5, eval=FALSE}
+# plot1.df$simType <- factor(plot1.df$simType, levels=rev(c("mean", "multiImp", "multiStrat", "multiRobust")))
+# p1.1 <- ggplot(plot1.df)+
+#     geom_errorbar(aes(xmin=bias-1.96*sd.mean, xmax=bias+1.96*sd.mean, y=simType, color=simType), width=.2, position=position_dodge(.9)) +
+#     geom_point(aes(x=bias, y = simType, color=simType), alpha=0.7, position=position_dodge(.9))+
+#     facet_grid(type ~ marker,scales = "free")+
+#     geom_vline(xintercept=0, linetype=3, alpha=0.6)+theme_minimal()+ggtitle(paste0("Mean Bias in 500 reps"))+xlab("Bias")+scale_color_paletteer_d("ltc::fernande")
+# p1.1
+```
+
+```{r fig.width=12, fig.height=12}
+# custom_colors <- c("With" = "#5D7A96",
+                     # "Without" = "#B87D7D")
+# make 4 subplots
+plot1.df$simType <- factor(plot1.df$simType, levels = c("Complete", "Synthesis", "MultSynth", "PAMS"))
+plot1_list <- list()
+types <- levels(plot1.df$type)
+scaleFUN <- function(x) sprintf("%.2f", x)
+for(typei in types){
+  plot1_list[[typei]] <- ggplot(subset(plot1.df, type==typei))+
+    geom_point(aes(y=estimates, x=simType), color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
+    geom_errorbar(aes(ymin=estimates-1.96*sd.mean, ymax=estimates+1.96*sd.mean, x=simType), width=.2,color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
+    facet_wrap(~ marker,scales = "free_y", nrow=2)+
+    geom_hline(aes(yintercept=estimates, linetype="True Parameter"), subset(data_truth_df, type==typei),
+               color="forestgreen", alpha=0.8)+
+    scale_linetype_manual(values = c("True Parameter" = "dashed"), name = NULL)+
+    scale_y_continuous(breaks = scales::extended_breaks(n = 4))+theme_minimal()+
+     theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+    ylab(paste0(typei, " of Expressions"))+
+    ggtitle(paste0(typei))+labs(x="Methods", color="Phenotype")
+}
+
+ggarrange(plot1_list[[1]],
+          plot1_list[[2]],
+          plot1_list[[3]],
+          plot1_list[[4]], 
+          ncol = 1, nrow = 4)
+```
+
+## Figure 2: Accuracy of standard error estimation
+
+This is fraction of
+
+1.  Numerator $$
+      \hat E(\hat{SE}(\hat\theta^b_{Imp}))=\frac1B\sum_{b=1}^B\hat{SE}(\hat\theta^b_{Imp})
+      $$ where $\hat{SE}(\hat\theta^b_{Imp})$ is generated with the GEE parameter SE and rubin's rule.
+
+2.  Denominator $$
+      \hat{SE}(\hat\theta^b_{Imp})=\sqrt{\frac1{B-1}\sum_{b=1}^B(\hat\theta^b_{Imp}-\frac1B\sum{\hat\theta^b_{Imp}})^2}
+      $$
+      
+```{r fig.width=12, fig.height=12}
+# calculate estimate and sd with dplyr
+
+plot2.df <- res.df.all.imp %>% group_by(marker, type, simType) %>% 
+  reframe(meanSD=mean(sd),SDmean=sd(mean),sd.ratio = mean(sd)/sd(mean))
+plot2.df$simType <- factor(plot2.df$simType, levels = c("Complete", "Synthesis", "MultSynth", "PAMS"))
+plot2_list <- list()
+for(typei in types){
+plot2_list[[typei]]<- ggplot(subset(plot2.df, type==typei))+
+    geom_bar(stat="identity",aes(y=sd.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+    facet_wrap(~marker, scales = "free_y", ncol=7)+scale_y_continuous(labels=scaleFUN)+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0(typei))+
+    labs(fill="Phenotype", x="Methods", y="Ratio of Standard Error")
+}
+ggarrange(plotlist = plot2_list,
+          ncol = 1, nrow = 4)
+
+
+```
+
+
+```{r fig.width=15, fig.height=10, eval=FALSE}
+plot2.reframe <- reshape2::melt(plot2.df, id.vars=c("marker","type","simType","sd.ratio"))
+levels(plot2.reframe$variable) <- c("SDmean", "meanSD")
+p2.1 <- ggplot(plot2.reframe)+
+    geom_bar(stat="identity",aes(value, type, fill=simType), alpha=0.7, position=position_dodge(), width=0.8)+
+    facet_wrap(~marker, scales = "free_x")+
+    theme_minimal()+ggtitle(paste0("Standard error estimation accuracy"))+scale_fill_paletteer_d("ltc::fernande")
+p2.1
+
+# make 4 subplots
+plot2_list <- list()
+types <- unique(plot2.df$type)
+for(typei in types){
+  plot2_list[[typei]] <- ggplot(subset(plot2.reframe, type==typei))+
+    geom_bar(stat="identity",aes(value, simType, fill=variable), position=position_dodge(), width=0.8)+
+    facet_wrap(~ marker,scales = "free_x", nrow=1)+
+    theme_minimal()+ggtitle(paste0("Checking ratio"))+scale_fill_paletteer_d("PNWColors::Sailboat")
+}
+library(ggpubr)
+ggarrange(plot2_list[[1]],
+          plot2_list[[2]],
+          plot2_list[[3]],
+          plot2_list[[4]], 
+          ncol = 1, nrow = 4)
+```
+
+
+## Figure 3: Relative efficiency
+
+This is fraction of
+
+1.  Numerator $$
+      \sqrt{\frac1B\sum^B_{b=1}(\hat\theta^b_{Imp}-\theta)^2}
+      $$
+2.  Denominator $$
+      \sqrt{\frac1B\sum^B_{b=1}(\hat\theta^b-\theta)^2}
+      $$
+      
+```{r fig.width=12, fig.height=12}
+# # numerator
+# names(res.df.all.imp)[1] <- "estimator"
+# plot3.df1 <- left_join(res.df.all.imp, truth_df[,c("mean","type", "marker")], by=c("type", "marker"))
+# plot3.df1 <- plot3.df1 %>% group_by(marker, type, simType) %>% 
+#   reframe(mse.est=sqrt(mean((estimator-mean)^2)))
+# # denominator
+# res.df.all.truth <- subset(res.df.all, simType == "Truth")
+# res.df.all.truth$type <- factor(res.df.all.truth$type, levels = c("mean", "q90", "q95", "q99"),
+#                               labels=c("Mean", "90th Quantile", "95th Quantile", "99th Quantile"))
+# names(res.df.all.truth)[1] <- "estimator"
+# plot3.df2 <- left_join(res.df.all.truth, truth_df[,c("mean","type", "marker")], by=c("type", "marker"))
+# plot3.df2 <- plot3.df2 %>% group_by(marker, type) %>% 
+#   reframe(mse.truth=sqrt(mean((estimator-mean)^2)))
+# # divide
+# plot3.df <- left_join(plot3.df1, plot3.df2[,c("mse.truth","type", "marker")], by=c("type", "marker"))
+# plot3.df$mse.ratio <- plot3.df$mse.est / plot3.df$mse.truth
+# plot3.df <- plot3.df %>%
+#   complete(methods, phenotype, marker, type)
+# plot3_list <- list()
+# for(typei in types){
+# plot3_list[[typei]]<- ggplot(subset(plot3.df, type==typei))+
+#     geom_bar(stat="identity",aes(y=mse.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+#    labs(fill="Phenotype", x="Methods", y="Ratio of RMSE")+
+#     facet_wrap(~marker, scales = "free_y", ncol=7)+scale_y_continuous(labels=scaleFUN)+
+#     geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+#     theme_minimal()+ggtitle(paste0(typei))+scale_fill_manual(values = custom_colors)
+# }
+# ggarrange(plot3_list[[1]],
+#           plot3_list[[2]],
+#           plot3_list[[3]],
+#           plot3_list[[4]], 
+#           ncol = 1, nrow = 4)
+
+# complete data
+# numerator
+
+names(res.df.all.imp)[1] <- "estimator"
+plot3.df1 <- left_join(res.df.all.imp, truth_df[,c("mean","type", "marker")], by=c("type", "marker"))
+plot3.df1 <- plot3.df1 %>% group_by(marker, type, simType) %>% 
+  reframe(mse.est=sqrt(mean((estimator-mean)^2)))
+# denominator
+res.df.all.truth <- subset(res.df.all, simType == "Truth")
+res.df.all.truth$type <- factor(res.df.all.truth$type, levels = c("mean", "q90", "q95", "q99"),
+                              labels=c("Mean", "90th Quantile", "95th Quantile", "99th Quantile"))
+names(res.df.all.truth)[1] <- "estimator"
+plot3.df2 <- left_join(res.df.all.truth, truth_df[,c("mean","type", "marker")], by=c("type", "marker"))
+plot3.df2 <- plot3.df2 %>% group_by(marker, type) %>% 
+  reframe(mse.truth=sqrt(mean((estimator-mean)^2)))
+# divide
+plot3.df <- left_join(plot3.df1, plot3.df2[,c("mse.truth","type", "marker")], by=c("type", "marker"))
+plot3.df$mse.ratio <- plot3.df$mse.est / plot3.df$mse.truth
+plot3.df <- plot3.df %>%
+  complete(marker, type)
+plot3.df$simType <- factor(plot3.df$simType, levels = c("Complete", "Synthesis", "MultSynth", "PAMS"))
+plot3_list <- list()
+for(typei in types){
+plot3_list[[typei]]<- ggplot(subset(plot3.df, type==typei))+
+    geom_bar(stat="identity",aes(y=mse.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+   labs(x="Methods", y="Ratio of RMSE")+
+    facet_wrap(~marker, scales = "free_y", ncol=7)+scale_y_continuous(labels=scaleFUN)+
+    geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    theme_minimal()+ggtitle(paste0(typei))+
+    theme(axis.text.x = element_text(angle = 30, vjust = 0.8))
+}
+ggarrange(plot3_list[[1]],
+          plot3_list[[2]],
+          plot3_list[[3]],
+          plot3_list[[4]], 
+          ncol = 1, nrow = 4)
+```
+
+## Figure 4: coverage
+
+coverage
+
+This is the percentage number of times that the confidence interval of the estimator catches the true estimator $\theta$, out of $B$ bootstrap simulations. The confidence interval standard deviation is generated with GEE parameter SEs and rubin's rule.
+
+In each simulation, coverage is considered:
+$$
+     \hat\theta^b_{Imp}-sd*1.96<\theta<\hat\theta^b_{Imp}+sd*1.96
+$$
+assuming the t-stats is 1.96. It can be written as
+
+$$
+     -sd*1.96<\theta-\hat\theta^b_{Imp}<sd*1.96
+$$
+which is 
+
+$$ |\theta-\hat\theta^b_{Imp}|<sd*1.96$$
+
+```{r fig.width=12, fig.height=12}
+names(res.df.all.imp)[1] <- "estimator"
+plot4.df <- left_join(res.df.all.imp, truth_df[,c("mean","type", "marker")], by=c("type", "marker"))
+coverage <- plot4.df %>%  
+  reframe(coverage=stats*sd > abs(mean-estimator))
+plot4.df <- data.frame(plot4.df, coverage)
+plot4.df <- plot4.df  %>% group_by(marker, type, simType) %>% 
+  reframe(cov.mean=mean(coverage))
+plot4.df$simType <- factor(plot4.df$simType, levels = c("Complete", "Synthesis", "MultSynth", "PAMS"))
+plot4_list <- list()
+for(typei in types){
+plot4_list[[typei]]<- ggplot(subset(plot4.df, type==typei))+
+    geom_bar(stat="identity",aes(y=cov.mean, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+    facet_wrap(~marker, scales = "free_y", ncol=7)+scale_y_continuous(labels=scaleFUN)+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+               color = "forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+    theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 0.8))+ggtitle(paste0(typei))+
+    labs(x="Methods", y="Coverage")
+}
+ggarrange(plot4_list[[1]],
+          plot4_list[[2]],
+          plot4_list[[3]],
+          plot4_list[[4]], 
+          ncol = 1, nrow = 4)
+```
+
+
+## figure 1 component
+
+```{r fig.height=20, fig.width=10}
+# essentially summary data comparison
+test.ID.df$status <- ifelse(test.ID.df$status=="normal", "inactive", test.ID.df$status)
+status.df <- test.ID.df[, c("ID", "status")]
+fig1.df <- left_join(all.data.df, status.df, by="ID")
+
+# t.test
+
+# Create a combined grouping variable for all combinations of group1 and group2
+df <- fig1.df  %>%
+  mutate(combined_group = interaction(type, marker, status, sep = ": "))
+
+# Function to perform t-test and extract p-value
+get_p_value <- function(data) {
+  if (n_distinct(data$symption) < 2) {
+    return(NA) # Cannot perform t-test if only one level of symption
+  }
+  tryCatch({
+    t.test_result <- t.test(value ~ status, data = data)
+    return(t.test_result$p.value)
+  }, error = function(e) {
+    return(NA) # Return NA if t-test fails
+  })
+}
+
+# Group by the combined group and apply the t-test function
+p_values <- fig1.df %>%
+  group_by(type, marker, source) %>%
+  summarise(pval = t.test(value ~ status)$p.value)
+p_values$y <- case_when(
+    p_values$type == "mean" ~ 0.3,
+    p_values$type == "q90" ~ 0.6,
+    p_values$type == "q95" ~ 0.75,
+    p_values$type == "q99" ~ 1.2
+)
+p_values$pval <- ifelse(p_values$pval>0.001, as.character(round(p_values$pval, 4)), "<0.001")
+p_values <- data.frame(p_values)
+
+fig.list <- list()
+for(typei in c("mean", "q90", "q95", "q99")){
+  fig1.sub <- subset(fig1.df, type==typei)
+  pval.sub <- subset(p_values, type==typei)
+  p <- 
+  ggplot() +
+  geom_violin(data = fig1.sub, aes(x=source, y=value, fill=status), alpha=0.2, color="grey40") +
+  geom_jitter(data = fig1.sub, aes(x=source, y=value, fill=status, color=status), size=1, alpha=1, stroke = 0,
+              position = position_jitterdodge(jitter.width = 0.3, dodge.width = 1)) +
+  geom_text(data = pval.sub ,aes(x=source, y = y, label = pval),  color="red") +
+  scale_color_manual(values = c("active" = "red", "inactive" = "blue")) + # Set contrasting colors
+  theme(
+    legend.position="right",# Changed to show the legend for points
+    plot.title = element_text(size = 5), # Adjust title size
+    legend.text = element_text(size = 4),  # Adjust legend text size
+    legend.title = element_text(size = 5)   # Adjust legend title size (if any)
+  ) +
+  theme_pubclean() +
+  ggtitle(paste0("compare truth and synth: slide ", typei)) +
+  facet_wrap(~marker, nrow=2) +
+  xlab("")
+  fig.list[[typei]] <- p
+}
+
+ggarrange(fig.list[[1]],
+          fig.list[[2]],
+          fig.list[[3]],
+          fig.list[[4]],
+          ncol = 1, nrow = 4)
+```
+```{r fig.height=20, fig.width=15}
+for(typei in c("mean", "q90", "q95", "q99")){
+  fig1.sub <- subset(fig1.df, type==typei)
+  pval.sub <- subset(p_values, type==typei)
+  p <- 
+  ggplot() +
+  geom_boxplot(data = fig1.sub, aes(x=source, y=value, fill=status), alpha=0.2, color="grey50", outliers = FALSE) +
+  geom_jitter(data = fig1.sub, aes(x=source, y=value, fill=status, color=status), size=1, alpha=1, stroke = 0,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7)) +
+  scale_color_manual(values = c("active" = "red", "inactive" = "darkgreen", normal = "blue")) + # Set contrasting colors
+  theme(
+    legend.position="right",# Changed to show the legend for points
+    plot.title = element_text(size = 5), # Adjust title size
+    legend.text = element_text(size = 4),  # Adjust legend text size
+    legend.title = element_text(size = 5)   # Adjust legend title size (if any)
+  ) +
+  theme_pubclean() +
+  ggtitle(paste0("compare truth and synth: slide ", typei)) +
+  facet_wrap(~marker, nrow=2, scales = "free_y") +
+  xlab("")
+  fig.list[[typei]] <- p
+}
+
+ggarrange(fig.list[[1]],
+          fig.list[[2]],
+          fig.list[[3]],
+          fig.list[[4]],
+          ncol = 1, nrow = 4)
+```
+
+```{r fig.height=2, fig.width=9}
+# fig1.df$source <- factor(fig1.df$source, levels=c("synth", "truth"), labels = c("Synthesized", "Truth"))
+fig1.sub <- subset(fig1.df, type=="q99" & marker %in% c("CD20", "CD68") & status != "normal")
+pval.sub <- subset(p_values, type=="q99" & marker %in% c("CD20", "CD68"))
+pval.sub$y <- rep(1.2,4)
+pval.sub$pval <- paste("p =", pval.sub$pval)
+fig1.sub$marker <- factor(fig1.sub$marker, levels=c("CD68", "CD20"))
+ggplot() +
+  geom_boxplot(data = fig1.sub, aes(x=source, y=value, fill=status), alpha=0.2, color="grey50", outliers = FALSE) +
+  geom_jitter(data=subset(fig1.sub, ID %in% c("GCA045TIB_TISSUE01","GCA069TIB_TISSUE01")), aes(x=source, y=value, fill=status, shape=factor(ID)),
+              color="black", size=2, stroke=0.5,
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7))+
+  ylim(0.3, 1.3)+
+  geom_text(data = pval.sub ,aes(x=source, y = y, label = pval),  color="grey50", size=3)+
+  scale_shape_manual(values = c("GCA045TIB_TISSUE01" = 22, "GCA069TIB_TISSUE01" = 23), name = "ID", 
+                     labels = c("03", "04")) +
+  scale_fill_manual(values = c("active" = "#A8D8A8", "inactive" = "#DDA0DD")) + # Set contrasting colors
+  guides(fill = guide_legend(override.aes = list(shape = NA)),  # Remove shape from Sex legend
+shape = guide_legend(override.aes = list(fill = c("#A8D8A8", "#DDA0DD"), color = "black", size = 2))) +  
+  theme(
+    legend.position="right",# Changed to show the legend for points
+    plot.title = element_text(size = 5), # Adjust title size
+    legend.text = element_text(size = 4),  # Adjust legend text size
+    legend.title = element_text(size = 5)   # Adjust legend title size (if any)
+  ) +
+  theme_pubclean()+theme(legend.position = "right")+
+  facet_wrap(~marker, nrow=1, scales = "free_y") + coord_flip()+
+  ylab("The 99th Quantile of Image Pixel")+xlab("")
+```
+
+# Figure 4
+
+Combine: CD68, CD20 and 99% qunatile only
+
+```{r fig.height=10, fig.width=6}
+marker_plot=c("CD20", "CD68")
+p1_f4 <- ggplot(subset(plot1.df, type=="99th Quantile" & marker %in% marker_plot))+
+  geom_point(aes(y=estimates, x=simType), color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
+  facet_wrap(~ marker,scales = "free_y", nrow=1)+
+  geom_hline(aes(yintercept=estimates, linetype="True Parameter"), 
+             subset(data_truth_df, type=="99th Quantile" & marker %in% marker_plot),
+             color="forestgreen", alpha=0.8)+
+  scale_linetype_manual(values = c("True Parameter" = "dashed"), name = NULL)+
+  scale_y_continuous(breaks = scales::extended_breaks(n = 4))+
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 30, vjust = 0.8),legend.position="top",
+        legend.box.spacing = unit(0, "pt"),legend.margin=margin(0,0,0,0)
+        )+ylab(paste0(typei, " of Expressions"))+
+  ggtitle("(a) Expected Value of Group Difference (Active v.s. Inactive)")+
+  xlab("Methods")
+
+p2_f4<- ggplot(subset(plot2.df, type=="99th Quantile" & marker %in% marker_plot))+
+   geom_bar(stat="identity",aes(y=sd.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+  facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
+  geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 0.8))+ggtitle("(b) Standard Error Estimation Accuracy")+
+  labs(fill="Phenotype", x="Methods", y="Ratio of Standard Error")
+
+p3_f4 <- ggplot(subset(plot3.df, type=="99th Quantile" & marker %in% marker_plot))+
+ geom_bar(stat="identity",aes(y=mse.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+  labs(fill="Phenotype", x="Methods", y="Ratio of RMSE")+
+  facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
+  geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+  theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 0.8))+ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")
+
+p4_f4 <- ggplot(subset(plot4.df, type=="99th Quantile" & marker %in% marker_plot))+
+  geom_bar(stat="identity",aes(y=cov.mean, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
+  facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
+  geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+             color = "forestgreen") +
+  scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 30, vjust = 0.8),legend.position="top",
+                legend.box.spacing = unit(0, "pt"),legend.margin=margin(0,0,0,0))+
+  ggtitle("(d) Coverage of 95% CI")+
+  labs(fill="Phenotype", x="Methods", y="Coverage")
+ggarrange(p1_f4, p2_f4, p3_f4, p4_f4, nrow=4)
+```
+
+```{r eval=FALSE}
+# some more debug plots
+test.ID.df <- readRDS("~/ImImp/codeImputation/pixn2n/test.ID.df.rds")
+marker="CD68"
+# read data
+data.marker <- readRDS(paste0("/media/disk2/GCA_norm/tissue_quantiles/", marker, ".rds"))
+## bootstrap
+## calibration/test split: sample tissue
+sample.size <- 200
+all.patients <- sample(1:length(data.marker), sample.size, replace = TRUE)
+calib.patient <- all.patients[1:(sample.size/2)]
+test.patient <- all.patients[(sample.size/2+1): sample.size]
+## assemble calibration and testing data
+calib_data_list <- data.marker[calib.patient]
+test_data_list <- data.marker[test.patient]
+# extract: truth & synth, calibration 
+calib_data_truth <- do.call(rbind, lapply(calib_data_list, "[[", "ref"))
+calib_data_synth <- do.call(rbind, lapply(calib_data_list, "[[", "input"))
+# extract: synth, calibration
+test_data_synth <- do.call(rbind, lapply(test_data_list, "[[", "input"))
+test_data_truth <- do.call(rbind, lapply(test_data_list, "[[", "ref"))
+
+plot(x=test_data_truth[,4], y=test_data_synth[,4], ylab="synth_q99", xlab="truth_q99", main="Incomplete in one simulation")
+ abline(a=0, b=1)
+ 
+# make plot figure data frame
+diag.plot.df <- data.frame(truth=test_data_truth[,4],
+                           synth=test_data_synth[,4],
+                           status = test.ID.df$status[test.patient])
+boxplot(truth ~ status ,data=diag.plot.df, main="Incomplete Truth \n in one simulation")
+boxplot(synth ~ status ,data=diag.plot.df, main="Incomplete Synth \n (mean) in one simulation")
+
+empirical_error <- calib_data_truth - calib_data_synth
+
+# multiple imputation (simple)
+imputed_list <- imputed_list_robust <- list()
+  sample_idx <- sample(1:nrow(empirical_error), nrow(test_data_synth), replace = TRUE)
+  error_sampled <- empirical_error[sample_idx,]
+  imputed <- data.frame(test_data_synth + error_sampled)
+boxplot(imputed[,4] ~ test.ID.df$status[test.patient], main="Incomplete Synth (simple) in \n one simulation & imputation", 
+        ylab="synth_multi_simple", xlab="status")
+
+diag.plot.df$status <- factor(diag.plot.df$status, levels=c("inactive", "active"))
+m0_true <- lm(truth ~ status, diag.plot.df)
+estimate_true <- m0_true$coefficients[2]
+stdError_true <- sqrt(vcovHC(m0_true, type = "HC3")[2,2])
+
+m0_synth <- lm(synth ~ status, diag.plot.df)
+estimate_synth <- m0_synth$coefficients[2]
+stdError_synth <- sqrt(vcovHC(m0_synth, type = "HC3")[2,2])
+
+diag.plot.df$multi <- imputed[,4]
+m0_multi <- lm(multi ~ status, diag.plot.df)
+estimate_multi <- m0_multi$coefficients[2]
+stdError_multi <- sqrt(vcovHC(m0_multi, type = "HC3")[2,2])
+
+imputed_list <- imputed_list_robust <- list()
+  for (i in 1:10){
+      sample_idx <- sample(1:nrow(empirical_error), nrow(test_data_synth), replace = TRUE)
+      
+    error_sampled <- empirical_error[sample_idx,]
+    imputed <- data.frame(test_data_synth + error_sampled)
+    names(imputed) <- colnames(calib_data_truth)
+    
+    # use linear regression model
+    res_list <- list()
+    type.i=4
+      ## calibration data frame and test data frame rbind()
+      imputed_i_df <- data.frame(values = imputed[[type.i]],
+                                 test.ID.df[test.patient, c("status", "tissue.1", "patient")])
+      
+      # combine status
+      imputed_i_df$status <- ifelse(imputed_i_df$status=="normal", "inactive", imputed_i_df$status)
+      imputed_i_df$status <- factor(imputed_i_df$status, levels=c("inactive", "active"))
+      
+        m0 <- lm(values ~ status, imputed_i_df)
+        estimate <- m0$coefficients[2]
+        stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
+        res_list <- list(coef = estimate, sd = stdError, type = type.i)
+            imputed_list[[i]] <- res_list
+    }
+
+  
+  ## Rubin's rule
+  # extract patient outcome
+imputed_i_res_df <- data.frame(lapply(names(imputed_list[[1]]),
+                                    function(nm){unlist(lapply(imputed_list, "[[", nm))}))
+names(imputed_i_res_df) <- names(imputed_list[[1]])
+type_output <- rubin_imp_calc(imputed_i_res_df)
+
+estimate.df <- data.frame(estimate = c(estimate_true, estimate_synth, type_output$mean),
+                          error = c(stdError_true, stdError_synth, type_output$sd),
+                          type=c("Truth", "Synth", "Bootstrap(Rubin)"))
+estimate.df <- rbind(estimate.df, data.frame(estimate = imputed_i_res_df$coef,
+                                error = imputed_i_res_df$sd,
+                                type=paste0("Simple", 1:10))
+                                )
+
+ggplot(estimate.df, aes(x = type, y = estimate)) +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = estimate - error, ymax = estimate + error), width = 0.1) +
+  labs(x = "Group", y = "Difference (active - inactive)") +ggtitle("q99 group difference")+
+  theme_minimal()
+
+```
+

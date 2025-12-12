@@ -1,0 +1,411 @@
+---
+title: "mIF analysis cell level data"
+author: "Ruby Xiong"
+format: 
+  html:
+    embed-resources: true
+    theme:
+      - flatly
+    toc: true
+    code-fold: true
+    code-tools: true
+editor: source
+---
+
+Location of analysis files:
+~/ImImp/codeImputation/Functions_imputation.R
+~/ImImp/codeImputation/metric_script.R
+
+
+
+# Figure S5
+```{r fig.height=6, fig.width=12}
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+source("~/ImImp/codeImputation/Functions_imputation.R")
+metrics_result_markers(c("CD20","CD38","CD138","CD4", "CD8", "CD68"))
+```
+
+
+```{r}
+metrics_figure5_markers <- function(markers, root_dir="~/ImageImputation/metricsAllMarker"){
+  full.metric <- btsp.metric <- btsp.true <- true.param <- list()
+  for(marker in markers){
+    ## put metrics together
+    metric.list <- metric.list.nophe <- list()
+    
+    true.res <- get(load(paste0(root_dir, "/metrics_", marker, "_nophe/true.df.plot.geediff.RData")))
+    for(rep.i in 1:500){
+      Dir <- paste0(root_dir, "/metrics_",marker,"_phenotype/rep", rep.i, "/")
+      load(paste0(Dir, "metric.df.RData"))
+      metric.df$rep <- rep.i
+      metric.list[[rep.i]] <- metric.df
+      
+      Dir <- paste0(root_dir, "/metrics_",marker,"_nophe/rep", rep.i, "/")
+      load(paste0(Dir, "metric.df.RData"))
+      metric.df$rep <- rep.i
+      metric.list.nophe[[rep.i]] <- metric.df
+    }
+    metric.df.all <- do.call(rbind,metric.list)
+    rm(list = "metric.list")
+    metric.df.all$methods <- factor(metric.df.all$methods, levels=rev(c("mean", "simple","local", "bySample")))
+    metric.df.all$phenotype <- "TRUE"
+    metric.df.all$truth.mean <- true.res$means
+    
+    metric.df.nophe.all <- do.call(rbind,metric.list.nophe)
+    rm(list = "metric.list.nophe")
+    metric.df.nophe.all$methods <- factor(metric.df.all$methods, levels=rev(c("mean", "simple","local", "bySample")))
+    metric.df.nophe.all$truth.mean <- true.res$means
+    metric.df.nophe.all$phenotype <- "FALSE"
+    
+    # assemble true data
+    true.res$marker <- marker
+    true.param[[marker]] <- true.res
+    
+    metric.df.all <- rbind(metric.df.all, metric.df.nophe.all)
+    rm(list = "metric.df.nophe.all")
+    metric.df.all$marker <- marker
+    full.metric[[marker]] <- metric.df.all
+  }
+
+  
+  # plot 1: bias
+  metric.df.all <- do.call(rbind, full.metric)
+  
+  metric.df.all.bias <-
+    metric.df.all %>% group_by(phenotype, methods, quantile, marker) %>%
+    reframe(mean.est = mean(means), se = sd(means)*(sqrt(499))/500, sd.ratio=mean(sd)/sd(means),
+            btsp.bias = sqrt(mean((btspmean-truth.mean)^2)), mse.bias=sqrt(mean(bias^2)),
+            coverage=mean(coverage))
+  
+  colnames(metric.df.all.bias)[5] <- "means"
+  
+    metric.df.all.bias$methods <- factor(metric.df.all.bias$methods, 
+                                       levels=c("bySample", "local", "simple", "mean"),
+                                       labels = c("Multilevel", "Local",
+                                                  "Multisynth", "Synthesis"))
+  metric.df.all.bias$phenotype <- as.logical(metric.df.all.bias$phenotype)
+  metric.df.all.bias$phenotype <- ifelse( metric.df.all.bias$phenotype, "With", "Without")
+  p1.vars <- c("quantile", "means", "se", "marker", "methods", "phenotype")
+  metric.df.all.bias.p1 <- metric.df.all.bias[,p1.vars]
+  metric.df.all.bias.p1$type <- metric.df.all.bias$phenotype
+  true.param.all <- do.call(rbind, true.param)
+  custom_colors <- c("With" = "#5D7A96",
+                     "Without" = "#B87D7D")
+# Clean version 
+p1 <- ggplot(subset(metric.df.all.bias.p1, quantile=="99%"), aes(x = methods, y = means, color = phenotype)) +
+      geom_point(alpha = 0.7, position = position_dodge(0.9)) +
+      geom_hline(data=subset(true.param.all, quantile=="99%"), aes(yintercept=means, linetype="True Parameter"), color="forestgreen")+
+      scale_linetype_manual(values = c("True Parameter" = "dashed"), name=NULL) + labs(linetype = "True Parameter") +
+      facet_wrap(quantile ~ marker, scales = "free_y", ncol=6) +
+      scale_color_manual(values = custom_colors) +
+      ggtitle("(a) Expected Value of Group Difference (DII v.s. CLR)") +
+      ylab("Difference in Mean 99th Quantile")+
+      labs(color="Phenotype", x="Methods")+
+      theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+  ### plot 2: MSE of imputation estimator / SD of boostrap estimator
+  custom_colors2 <- c("With" = "#5D7A96",
+                     "Without" = "#B87D7D")
+
+  p2 <- ggplot(subset(metric.df.all.bias, quantile=="99%"))+
+    geom_bar(stat="identity",aes(sd.ratio, methods, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
+    scale_fill_manual(values = custom_colors2)+coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Deviation")
+  
+  metric.df.all.bias$mse.ratio <- metric.df.all.bias$mse.bias/metric.df.all.bias$btsp.bias
+  p3 <- ggplot(subset(metric.df.all.bias, quantile=="99%"))+
+    geom_bar(stat="identity",aes(mse.ratio, methods, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype=3, alpha=0.6)+
+    ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")+
+    scale_fill_manual(values = custom_colors2)+coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of RMSE")
+  
+  # plot 4: coverage
+  options(na.rm=TRUE)
+  library(tidyr)
+  table1 <- spread(metric.df.all.bias[,c("methods", "coverage", "marker", "quantile", "phenotype")], methods, coverage, marker)
+  for(i in 4:7){
+    table1[[i]] <- as.numeric(table1[[i]])
+  }
+  table2 <- reshape2::melt(
+    data.frame((table1[,4:7]), quantile=table1$quantile, phenotype=table1$phenotype, marker=table1$marker),
+                 id.vars=c("quantile", "phenotype", "marker"), variable.name = "methods")
+  
+   table2$methods <- factor(table2$methods,
+                            labels = c("Local\nMultiple", "Local","Simple", "Synthesis"))
+  p4 <- ggplot(subset(table2, quantile=="99%"))+
+    geom_bar(stat="identity",aes(methods, value, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    xlab("Percentage")+ geom_vline(xintercept = 0, linetype=2, alpha=0.8)+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+               color = "forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+    labs(linetype = "Reference Line") + ggtitle("Coverage of 95% CI")+
+    scale_fill_manual(values = custom_colors2)+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ 
+    labs(fill="Phenotype", x="Methods", y="Coverage")
+  
+  return(list(p1,p2,p3,p4))
+}
+```
+
+# Figure 5
+
+```{r fig.height=10, fig.width=12}
+fig5 <- metrics_figure5_markers(c("CD20","CD38","CD138","CD4", "CD8", "CD68"))
+ggarrange(fig5[[1]],fig5[[2]],fig5[[3]],fig5[[4]], nrow=4)
+```
+
+# dissertation ch3, CDE
+```{r}
+library(hdrcde)
+dataSchurch <- read.csv("~/ImageImputation/dataSchurchLite.csv")
+patients <- unique(dataSchurch$patients)
+patientGroup <- dataSchurch %>% group_by(patients, groups)%>%reframe()
+patientCLR <- unlist(subset(patientGroup, groups==1, patients))
+patientDII <- setdiff(patients, patientCLR)
+dataSchurch.patientsplit <- split(dataSchurch, dataSchurch$patients)
+load("~/ImageImputation/nzNormedMarkers.RData")
+marker="CD4"
+set.seed(1)
+phenotype=FALSE
+trainPatients <- c(sample(patientCLR, 10, replace=FALSE), sample(patientDII, 10, replace=FALSE))
+testPatients <- sample(setdiff(patients,trainPatients), 1)
+setdiff(patients,trainPatients)
+## slide - patient correspondence
+SlidePatients <- dataSchurch  %>% group_by(patients, File.Name) %>% reframe()
+## training slides
+trainSlides <- SlidePatients$File.Name[which(SlidePatients$patients %in% trainPatients)]
+testSlides <- SlidePatients$File.Name[which(SlidePatients$patients %in% testPatients)]
+
+trainData <- createFoldData(dat=dataSchurch,
+slideTrain = trainSlides,
+marker = marker)
+
+cv_model2 <- glmnet:::cv.glmnet(trainData[[1]], trainData[[3]], alpha = 1, nfolds = 5)
+
+best_lambda2 <- cv_model2$lambda.min
+best_model2 <- glmnet::glmnet(trainData[[1]], trainData[[3]], alpha = 1, lambda = best_lambda2)
+
+testData <- createFoldData(dat=dataSchurch, slideTrain = testSlides, marker = marker)
+
+Yhat <- as.numeric(predict(best_model2, newx = testData[[1]], s = best_lambda2))
+resid = testData[[3]] - Yhat
+
+ab <- cde.bandwidths(x = Yhat, y = resid, method=2, xden="uniform")
+  a <- ab$a
+  b <- ab$b
+  xmar=50; ymar=100
+  # use hdr cde
+fit_cde <- hdrcde::cde(
+    x = Yhat, y = resid,
+    nxmargin = xmar,
+    nymargin = ymar,
+    a=a,
+    b=b
+  )
+plot(fit_cde,plot.fn = "stacked")
+
+```
+
+```{r}
+# plot some singles
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+
+# pick the same slices as your base R code
+x_idx <- (1:9) * 5
+
+xvals <- fit_cde$x
+yvals <- fit_cde$y
+zmat  <- fit_cde$z
+
+# Build a tidy dataframe for the chosen slices only
+df <- data.frame(y = rep(yvals, length(x_idx)),
+                 density = as.vector(t(zmat[x_idx, ])),
+                 slice = rep(paste0("Yhat=", round(xvals[x_idx], 2)), each = length(yvals)))
+
+# Plot with ggplot2, one facet per slice
+ggplot(df, aes(x = y, y = density)) +
+  geom_area(fill = "steelblue", alpha = 0.8,
+            color = "black", linewidth = 0.5) +
+  facet_wrap(~slice, nrow=3) +
+  theme_pubr() +
+  labs(x = fit_cde$y.name %||% "y",
+       y = "Conditional density",
+       title = "Conditional density slices at selected Yhat")
+```
+```{r}
+
+testPatients <- setdiff(patients,trainPatients)
+for(p_i in testPatients){
+  testSlides <- SlidePatients$File.Name[which(SlidePatients$patients %in% p_i)]
+  testData <- createFoldData(dat=dataSchurch, slideTrain = testSlides, marker = marker)
+  
+  Yhat <- as.numeric(predict(best_model2, newx = testData[[1]], s = best_lambda2))
+  resid = testData[[3]] - Yhat
+  
+  ab <- cde.bandwidths(x = Yhat, y = resid, method=2, xden="uniform")
+    a <- ab$a
+    b <- ab$b
+    xmar=50; ymar=100
+    # use hdr cde
+  fit_cde <- hdrcde::cde(
+      x = Yhat, y = resid,
+      nxmargin = xmar,
+      nymargin = ymar,
+      a=a,
+      b=b
+    )
+  plot(fit_cde,plot.fn = "stacked")
+}
+
+```
+
+# presentation
+
+```{r}
+metrics_figure_presentation_markers <- function(markers, root_dir="~/ImageImputation/metricsAllMarker"){
+  full.metric <- btsp.metric <- btsp.true <- true.param <- list()
+  for(marker in markers){
+    ## put metrics together
+    metric.list <- metric.list.nophe <- list()
+    
+    true.res <- get(load(paste0(root_dir, "/metrics_", marker, "_nophe/true.df.plot.geediff.RData")))
+    for(rep.i in 1:500){
+      Dir <- paste0(root_dir, "/metrics_",marker,"_phenotype/rep", rep.i, "/")
+      load(paste0(Dir, "metric.df.RData"))
+      metric.df$rep <- rep.i
+      metric.list[[rep.i]] <- metric.df
+      
+      Dir <- paste0(root_dir, "/metrics_",marker,"_nophe/rep", rep.i, "/")
+      load(paste0(Dir, "metric.df.RData"))
+      metric.df$rep <- rep.i
+      metric.list.nophe[[rep.i]] <- metric.df
+    }
+    metric.df.all <- do.call(rbind,metric.list)
+    rm(list = "metric.list")
+    metric.df.all$methods <- factor(metric.df.all$methods, levels=rev(c("mean", "simple","local", "bySample")))
+    metric.df.all$phenotype <- "TRUE"
+    metric.df.all$truth.mean <- true.res$means
+    
+    metric.df.nophe.all <- do.call(rbind,metric.list.nophe)
+    rm(list = "metric.list.nophe")
+    metric.df.nophe.all$methods <- factor(metric.df.all$methods, levels=rev(c("mean", "simple","local", "bySample")))
+    metric.df.nophe.all$truth.mean <- true.res$means
+    metric.df.nophe.all$phenotype <- "FALSE"
+    
+    # assemble true data
+    true.res$marker <- marker
+    true.param[[marker]] <- true.res
+    
+    metric.df.all <- rbind(metric.df.all, metric.df.nophe.all)
+    rm(list = "metric.df.nophe.all")
+    metric.df.all$marker <- marker
+    full.metric[[marker]] <- metric.df.all
+  }
+
+  
+  # plot 1: bias
+  metric.df.all <- do.call(rbind, full.metric)
+  
+  metric.df.all.bias <-
+    metric.df.all %>% group_by(phenotype, methods, quantile, marker) %>%
+    reframe(mean.est = mean(means), se = sd(means)*(sqrt(499))/500, sd.ratio=mean(sd)/sd(means),
+            btsp.bias = sqrt(mean((btspmean-truth.mean)^2)), mse.bias=sqrt(mean(bias^2)),
+            coverage=mean(coverage))
+  
+  colnames(metric.df.all.bias)[5] <- "means"
+  
+    metric.df.all.bias$methods <- factor(metric.df.all.bias$methods, 
+                                       levels=rev(c("bySample", "local", "simple", "mean")),
+                                       labels = rev(c("MultiLevel", "Local",
+                                                  "MultiSynth", "Synthesis")))
+  metric.df.all.bias$phenotype <- as.logical(metric.df.all.bias$phenotype)
+  metric.df.all.bias$phenotype <- ifelse( metric.df.all.bias$phenotype, "With", "Without")
+  p1.vars <- c("quantile", "means", "se", "marker", "methods", "phenotype")
+  metric.df.all.bias.p1 <- metric.df.all.bias[,p1.vars]
+  metric.df.all.bias.p1$type <- metric.df.all.bias$phenotype
+  true.param.all <- do.call(rbind, true.param)
+  custom_colors <- c("With" = "#5D7A96",
+                     "Without" = "#B87D7D")
+# Clean version # & methods!="Local"
+p1 <- ggplot(subset(metric.df.all.bias.p1, quantile=="99%" & methods!="Local"), aes(x = methods, y = means, color = phenotype)) +
+      geom_point(alpha = 0.7, position = position_dodge(0.9), size=2) +
+      geom_hline(data=subset(true.param.all, quantile=="99%"), aes(yintercept=means, linetype="True Parameter"), color="forestgreen")+
+      scale_linetype_manual(values = c("True Parameter" = "dashed"), name=NULL) + labs(linetype = "True Parameter") +
+      facet_wrap(quantile ~ marker, scales = "free_y", ncol=6) +
+      scale_color_manual(values = custom_colors) +
+      ggtitle("(a) Expected Value of Group Difference") +
+      ylab("Difference in Mean 99th Quantile")+
+      labs(color="Phenotype", x="Methods")+
+      theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+  ### plot 2: MSE of imputation estimator / SD of boostrap estimator
+  custom_colors2 <- c("With" = "#5D7A96",
+                     "Without" = "#B87D7D")
+
+  p2 <- ggplot(subset(metric.df.all.bias, quantile=="99%" & methods!="Local"))+
+    geom_bar(stat="identity",aes(sd.ratio, methods, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
+    ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
+    scale_fill_manual(values = custom_colors2)+coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Error")
+  
+  metric.df.all.bias$mse.ratio <- metric.df.all.bias$mse.bias/metric.df.all.bias$btsp.bias
+  p3 <- ggplot(subset(metric.df.all.bias, quantile=="99%"& methods!="Local"))+
+    geom_bar(stat="identity",aes(mse.ratio, methods, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    geom_vline(xintercept = 1, linetype=3, alpha=0.6)+
+    ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")+
+    scale_fill_manual(values = custom_colors2)+coord_flip()+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
+    labs(fill="Phenotype", y="Methods", x="Ratio of RMSE")
+  
+  # plot 4: coverage
+  options(na.rm=TRUE)
+  library(tidyr)
+  table1 <- spread(metric.df.all.bias[,c("methods", "coverage", "marker", "quantile", "phenotype")], methods, coverage, marker)
+  for(i in 4:7){
+    table1[[i]] <- as.numeric(table1[[i]])
+  }
+  table2 <- reshape2::melt(
+    data.frame((table1[,4:7]), quantile=table1$quantile, phenotype=table1$phenotype, marker=table1$marker),
+                 id.vars=c("quantile", "phenotype", "marker"), variable.name = "methods")
+  
+   table2$methods <- factor(table2$methods,
+                            labels = c("Local\nMultiple", "Local","Simple", "Synthesis"))
+  p4 <- ggplot(subset(table2, quantile=="99%"& methods!="Local"))+
+    geom_bar(stat="identity",aes(methods, value, fill=phenotype), alpha=0.7, position=position_dodge(), width=0.5)+
+    facet_grid(rows=vars(quantile), cols=vars(marker), scales = "free")+
+    xlab("Percentage")+ geom_vline(xintercept = 0, linetype=2, alpha=0.8)+
+    geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 
+               color = "forestgreen") +
+    scale_linetype_manual(values = c("95% CI Target" = "dashed"), name = NULL) +
+    labs(linetype = "Reference Line") + ggtitle("Coverage of 95% CI")+
+    scale_fill_manual(values = custom_colors2)+theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ 
+    labs(fill="Phenotype", x="Methods", y="Coverage")
+  
+  return(list(p1,p2,p3,p4))
+}
+```
+
+```{r fig.height=10, fig.width=12}
+fig5 <- metrics_figure_presentation_markers(c("CD20","CD38","CD138","CD4", "CD8", "CD68"))
+ggarrange(fig5[[1]],fig5[[2]],fig5[[3]],fig5[[4]], nrow=4)
+```
