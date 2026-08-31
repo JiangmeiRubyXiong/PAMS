@@ -160,6 +160,8 @@ analysis_marker <- function(marker){
 # 3. sample errors and add to each testing tissue
 # 4. calculate rubin's rule estimation results (GEE)
 
+
+
 marker_imputation <- function(marker, seed.i=1, n.imp = 20, type="strat"){
   ## split data into calibration and testing
   # read calibration and testing split
@@ -200,8 +202,12 @@ marker_imputation <- function(marker, seed.i=1, n.imp = 20, type="strat"){
     if(type!="simple"){
       tissues <- test.ID.df$status[calib.patient]
       tissues_test <- test.ID.df$status[test.patient]
-      empirical.TI.idx <- which(tissues == "active")
-      empirical.AC.idx <- which(tissues !="active")
+      empirical.TI.idx.o <- which(tissues == "active")
+      empirical.AC.idx.o <- which(tissues !="active")
+      # resample idx
+      empirical.TI.idx <- sample(empirical.TI.idx.o, length(empirical.TI.idx.o), replace = TRUE)
+      empirical.AC.idx <- sample(empirical.AC.idx.o, length(empirical.AC.idx.o), replace = TRUE)
+      
       sample_idx <- rep(NA, nrow(test_data_synth))
       sample_idx[which(tissues_test=="active")] <- sample(empirical.TI.idx, 
                                                       sum(tissues_test=="active"), 
@@ -212,8 +218,10 @@ marker_imputation <- function(marker, seed.i=1, n.imp = 20, type="strat"){
                                                       replace = TRUE)
       
     }else{
-      sample_idx <- sample(1:nrow(empirical_error), nrow(test_data_synth), replace = TRUE)
+      # resample idx
+      empirical_error_idx <- sample(1:nrow(empirical_error), nrow(empirical_error), replace=TRUE)
       
+      sample_idx <- sample(empirical_error_idx, nrow(test_data_synth), replace = TRUE)
     }
     error_sampled <- empirical_error[sample_idx,]
     imputed <- data.frame(test_data_synth + error_sampled)

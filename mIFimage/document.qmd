@@ -323,7 +323,7 @@ scaleFUN <- function(x) sprintf("%.2f", x)
 for(typei in types){
   plot1_list[[typei]] <- ggplot(subset(plot1.df, type==typei))+
     geom_point(aes(y=estimates, x=simType), color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
-    geom_errorbar(aes(ymin=estimates-1.96*sd.mean, ymax=estimates+1.96*sd.mean, x=simType), width=.2,color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
+    # geom_errorbar(aes(ymin=estimates-1.96*sd.mean, ymax=estimates+1.96*sd.mean, x=simType), width=.2,color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
     facet_wrap(~ marker,scales = "free_y", nrow=2)+
     geom_hline(aes(yintercept=estimates, linetype="True Parameter"), subset(data_truth_df, type==typei),
                color="forestgreen", alpha=0.8)+
@@ -602,6 +602,7 @@ ggarrange(fig.list[[1]],
           fig.list[[4]],
           ncol = 1, nrow = 4)
 ```
+
 ```{r fig.height=20, fig.width=15}
 for(typei in c("mean", "q90", "q95", "q99")){
   fig1.sub <- subset(fig1.df, type==typei)
@@ -637,7 +638,9 @@ ggarrange(fig.list[[1]],
 fig1.sub <- subset(fig1.df, type=="q99" & marker %in% c("CD20", "CD68") & status != "normal")
 pval.sub <- subset(p_values, type=="q99" & marker %in% c("CD20", "CD68"))
 pval.sub$y <- rep(1.2,4)
+pval.sub$significant <- ifelse(pval.sub$pval<0.05, "Yes", "No")
 pval.sub$pval <- paste("p =", pval.sub$pval)
+
 fig1.sub$marker <- factor(fig1.sub$marker, levels=c("CD68", "CD20"))
 ggplot() +
   geom_boxplot(data = fig1.sub, aes(x=source, y=value, fill=status), alpha=0.2, color="grey50", outliers = FALSE) +
@@ -645,12 +648,13 @@ ggplot() +
               color="black", size=2, stroke=0.5,
               position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7))+
   ylim(0.3, 1.3)+
-  geom_text(data = pval.sub ,aes(x=source, y = y, label = pval),  color="grey50", size=3)+
   scale_shape_manual(values = c("GCA045TIB_TISSUE01" = 22, "GCA069TIB_TISSUE01" = 23), name = "ID", 
                      labels = c("03", "04")) +
   scale_fill_manual(values = c("active" = "#A8D8A8", "inactive" = "#DDA0DD")) + # Set contrasting colors
   guides(fill = guide_legend(override.aes = list(shape = NA)),  # Remove shape from Sex legend
 shape = guide_legend(override.aes = list(fill = c("#A8D8A8", "#DDA0DD"), color = "black", size = 2))) +  
+    geom_text(data = pval.sub ,aes(x=source, y = y, label = pval, color=significant), size=3, show.legend = FALSE)+
+  scale_color_manual(values = c("Yes"="#2E8B57", "No"="#B0B0B0")) +
   theme(
     legend.position="right",# Changed to show the legend for points
     plot.title = element_text(size = 5), # Adjust title size
@@ -659,7 +663,7 @@ shape = guide_legend(override.aes = list(fill = c("#A8D8A8", "#DDA0DD"), color =
   ) +
   theme_pubclean()+theme(legend.position = "right")+
   facet_wrap(~marker, nrow=1, scales = "free_y") + coord_flip()+
-  ylab("The 99th Quantile of Image Pixel")+xlab("")
+  ylab("The 99th Percentile of Image Pixel")+xlab("")
 ```
 
 # Figure 4
@@ -668,7 +672,7 @@ Combine: CD68, CD20 and 99% qunatile only
 
 ```{r fig.height=10, fig.width=6}
 marker_plot=c("CD20", "CD68")
-p1_f4 <- ggplot(subset(plot1.df, type=="99th Quantile" & marker %in% marker_plot))+
+p1_f4 <- ggplot(subset(plot1.df, type=="99th Quantile" & marker %in% marker_plot & simType != "MultSynth"))+
   geom_point(aes(y=estimates, x=simType), color="#5D7A96", alpha=0.7, position=position_dodge(.9))+
   facet_wrap(~ marker,scales = "free_y", nrow=1)+
   geom_hline(aes(yintercept=estimates, linetype="True Parameter"), 
@@ -684,21 +688,21 @@ p1_f4 <- ggplot(subset(plot1.df, type=="99th Quantile" & marker %in% marker_plot
   ggtitle("(a) Expected Value of Group Difference (Active v.s. Inactive)")+
   xlab("Methods")
 
-p2_f4<- ggplot(subset(plot2.df, type=="99th Quantile" & marker %in% marker_plot))+
+p2_f4<- ggplot(subset(plot2.df, type=="99th Quantile" & marker %in% marker_plot& simType != "MultSynth"))+
    geom_bar(stat="identity",aes(y=sd.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
   facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
   geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
   theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 0.8))+ggtitle("(b) Standard Error Estimation Accuracy")+
   labs(fill="Phenotype", x="Methods", y="Ratio of Standard Error")
 
-p3_f4 <- ggplot(subset(plot3.df, type=="99th Quantile" & marker %in% marker_plot))+
+p3_f4 <- ggplot(subset(plot3.df, type=="99th Quantile" & marker %in% marker_plot& simType != "MultSynth"))+
  geom_bar(stat="identity",aes(y=mse.ratio, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
   labs(fill="Phenotype", x="Methods", y="Ratio of RMSE")+
   facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
   geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
   theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 0.8))+ggtitle("(c) Relative RMSE (v.s. Full Data Estimator)")
 
-p4_f4 <- ggplot(subset(plot4.df, type=="99th Quantile" & marker %in% marker_plot))+
+p4_f4 <- ggplot(subset(plot4.df, type=="99th Quantile" & marker %in% marker_plot& simType != "MultSynth"))+
   geom_bar(stat="identity",aes(y=cov.mean, x=simType), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.8)+
   facet_wrap(~marker, scales = "free_y", nrow=1)+scale_y_continuous(labels=scaleFUN)+
   geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), 

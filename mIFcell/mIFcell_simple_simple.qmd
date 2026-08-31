@@ -90,8 +90,8 @@ imputation <- function(marker="CD20", trainSlides=trainSlide, testSlides=testSli
 
 }
 markers <- c("CD20","CD38","CD138","CD4", "CD8", "CD68")
-lapply(markers, imputation)
-lapply(markers, imputation, phenotype="FALSE")
+# lapply(markers, imputation)
+# lapply(markers, imputation, phenotype="FALSE")
 ```
 
 ```{r}
@@ -137,6 +137,8 @@ test.ID.df <- test.ID.df %>%
 imp.order <- names(readRDS("~/ImImp/codeImputation/mIFcellSimple/truthCD68.rds"))
 test.ID.df <- test.ID.df[match(imp.order, test.ID.df$File.Name),]
 saveRDS(test.ID.df , "~/ImImp/codeImputation/mIFcellSimple/test.ID.df.rds")
+
+
 marker_imputation <- function(marker, seed.i=1, n.imp = 10, phenotype=TRUE,
                               DIR="~/ImImp/codeImputation/mIFcellSimple"){
   ## split data into calibration and testing
@@ -187,19 +189,24 @@ marker_imputation <- function(marker, seed.i=1, n.imp = 10, phenotype=TRUE,
     if(phenotype){
       tissues <- calib.ID.df.new$groups
       tissues_test <- test.ID.df.new$groups
-      empirical.CLR.idx <- which(tissues == 1)
-      empirical.DII.idx <- which(tissues == 2)
+      empirical.CLR.idx.o <- which(tissues == 1)
+      empirical.DII.idx.o <- which(tissues == 2)
+      # resample
+      empirical.CLR.idx <- sample(empirical.CLR.idx.o, length(empirical.CLR.idx.o), replace = TRUE)
+      empirical.DII.idx <- sample(empirical.DII.idx.o, length(empirical.DII.idx.o), replace = TRUE)
+      
       sample_idx <- rep(NA, nrow(test_data_synth))
       sample_idx[which(tissues_test==1)] <- sample(empirical.CLR.idx, 
                                                       sum(tissues_test==1), 
                                                       replace = TRUE)
-      
       sample_idx[which(tissues_test==2)] <- sample(empirical.DII.idx, 
                                                       sum(tissues_test==2),
-                                                      replace = TRUE)
+                                                      replace = TRUE) 
       
     }else{
-      sample_idx <- sample(1:nrow(empirical_error), nrow(test_data_synth), replace = TRUE)
+      # resample
+      sample_idx.o <- sample(1:nrow(empirical_error), nrow(empirical_error), replace = TRUE)
+      sample_idx <- sample(sample_idx.o, nrow(test_data_synth), replace = TRUE)
       
     }
     error_sampled <- empirical_error[sample_idx,]
@@ -398,7 +405,7 @@ root_dir="~/ImImp/codeImputation/mIFcellSimple/res"
     ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
     coord_flip()+theme_minimal()+
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Deviation")
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Error")
   
   p2
   
@@ -428,8 +435,8 @@ root_dir="~/ImImp/codeImputation/mIFcellSimple/res"
   p4
 
 ```
-```{r}
-p1
+```{r fig.height=6, fig.width=12}
+p4
 ```
 
 ```{r}
@@ -450,7 +457,7 @@ ggplot(all.plot)+geom_jitter(aes(y=value, x=factor(groups), color=type), alpha=0
 
 
 ```{r}
-metric.df.all.bias.5 <- subset(metric.df.all.bias, type=="q99")
+metric.df.all.bias.5 <- subset(metric.df.all.bias, type=="q99" & methods != "MultiSynth")
 ## 99th percentile & stack
   p15 <- ggplot(metric.df.all.bias.5, aes(x = methods, y = mean.est), color = "#5D7A96") +
       geom_point(alpha = 0.7, position = position_dodge(0.9)) +
@@ -472,7 +479,7 @@ metric.df.all.bias.5 <- subset(metric.df.all.bias, type=="q99")
     ggtitle(paste0("(b) Standard Error Estimation Accuracy"))+
     coord_flip()+theme_minimal()+
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+
-    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Deviation")
+    labs(fill="Phenotype", y="Methods", x="Ratio of Standard Error")
 
   p35 <- ggplot(metric.df.all.bias.5)+
     geom_bar(stat="identity",aes(mse.ratio, methods), fill="#5D7A96", alpha=0.7, position=position_dodge(), width=0.5)+

@@ -1,5 +1,3 @@
-
-
 library(RNifti)
 library(neurobase)
 library(hdrcde)
@@ -107,8 +105,30 @@ FA_truth_region <- readRDS("/media/disk2/beijing_dti/Neuroimaging/FA_truth_regio
 calibration_error <- readRDS("/media/disk2/beijing_dti/Neuroimaging/calibration_error.rds")
 testt_subject_data <- read.csv("/media/disk2/beijing_dti/Neuroimaging/testt_subject_data.csv")
 
-# set.seed(1)
-# imputation_seed_generation <- lapply(1:500, function(i){set.seed(i);sample(1:nrow(testt_subject_data), 500, replace = TRUE)})
+# store calibration and testing splits for MAR
+# testing: 3,7 split for male and female 
+set.seed(1)
+imputation_seed_generation <- lapply(1:500, 
+                                     function(i){
+                                       set.seed(i)
+                                       test_sampled <- sample(1:nrow(testt_subject_data), 500, 
+                                                              replace = TRUE)
+                                       sex_sampled <- testt_subject_data[test_sampled,"Sex"]
+                                       test_sampled_M <- test_sampled[sex_sampled=="M"]
+                                       test_sampled_F <- test_sampled[sex_sampled=="F"]
+                                       
+                                       n_test_M <- round(length(test_sampled_M)*0.7)
+                                       test_M <- test_sampled_M[1:n_test_M]
+                                       calib_M <- test_sampled_M[-(1:n_test_M)]
+                                       n_test_F <- round(length(test_sampled_F)*0.3)
+                                       test_F <- test_sampled_F[1:n_test_F]
+                                       calib_F <- test_sampled_F[-(1:n_test_F)]
+                                       
+                                       btsp.idx.calib <- c(calib_M, calib_F)
+                                       btsp.idx.testing <- c(test_M, test_F)
+                                       
+                                       return(list(btsp.idx.calib, btsp.idx.testing))
+                                       })
 # saveRDS(imputation_seed_generation, file="/media/disk2/beijing_dti/Neuroimaging/imputation_seed_generation.rds")
 
 imputation_seed_generation <- readRDS("/media/disk2/beijing_dti/Neuroimaging/imputation_seed_generation.rds")
@@ -139,11 +159,14 @@ btsp_imp_df <- function(seed.i, n.imp=100, sub_data = testt_subject_data,
   # read data
   btsp.idx <- sample.idx[[seed.i]]
   # split 100 as calibration, 100 as testing
-  btsp.idx.calib <- btsp.idx[1:250]
-  btsp.idx.testing <- btsp.idx[251:500]
+  # btsp.idx.calib <- btsp.idx[1:250]
+  # btsp.idx.testing <- btsp.idx[251:500]
+  
+  btsp.idx.calib <- btsp.idx[[1]]
+  btsp.idx.testing <- btsp.idx[[2]]
   
   testing.data <- FA_synth_regions[btsp.idx.testing]
-  calibration.error <- calibration_errors[btsp.idx.calib]
+  calibration.error.original <- calibration_errors[btsp.idx.calib]
   regions <- testing.data[[1]]$names
   
   # create calibration data
@@ -186,9 +209,13 @@ btsp_imp_df <- function(seed.i, n.imp=100, sub_data = testt_subject_data,
   # multiple imputation
   
   # 1. NOT stratify by sex
+
   imputation.list <- list()
   for(i.imp in 1:n.imp){
     testing.data.frame <- roi.df
+    ## resample calibration error values
+    len.calib.error <- length(calibration.error.original)
+    calibration.error <- calibration.error.original[sample(1:len.calib.error, len.calib.error, replace = TRUE)]
     for(ind in 1:length(testing.data)){
       out.testing <- testing.data[[ind]]
       out.testing$values <- out.testing$values + unlist(calibration.error[sample(1:length(calibration.error),1)])
@@ -221,13 +248,26 @@ btsp_imp_df <- function(seed.i, n.imp=100, sub_data = testt_subject_data,
   
   # 2. Stratify by sex
   imputation.sex.list <- list()
-  calibration.error.female <- calibration.error[which(sub_data$Sex[btsp.idx.calib]=="F")]
-  calibration.error.male <- calibration.error[which(sub_data$Sex[btsp.idx.calib]=="M")]
+  calibration.error.female.original <- calibration.error.original[which(sub_data$Sex[btsp.idx.calib]=="F")]
+  
+  calibration.error.male.original <- calibration.error.original[which(sub_data$Sex[btsp.idx.calib]=="M")]
+
+  
   ind.sex <- sub_data$Sex[btsp.idx.testing]
   
   for(i.imp in 1:n.imp){
     testing.data.frame <- roi.df
+    ## resample calibration error values
+    calibration.error.female <- calibration.error.female.original[
+      sample(1:length(calibration.error.female.original), 
+             length(calibration.error.female.original), replace=TRUE)]
+    
+    calibration.error.male <- calibration.error.male.original[
+      sample(1:length(calibration.error.male.original), 
+             length(calibration.error.male.original), replace=TRUE)]
+    
     for(ind in 1:length(testing.data)){
+      
       out.testing <- testing.data[[ind]]
       if(ind.sex[ind] == "F"){
         out.testing$values <- out.testing$values + unlist(calibration.error.female[sample(1:length(calibration.error.female),1)])
@@ -262,7 +302,7 @@ btsp_imp_df <- function(seed.i, n.imp=100, sub_data = testt_subject_data,
   # 
   # saveRDS(imputation_result_sex, paste0(DIR, "/multipleImpSex.rds"))
   all.res <- list(complete = list.res.copmlete, meanImp = list.res.mean, multiImp = imputation_result, multiImpStrat = imputation_result_sex)
-  saveRDS(all.res, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/simulation", seed.i, ".rds"))
+  saveRDS(all.res, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_mar/M7F3/simulation", seed.i, ".rds"))
 }
 
 mclapply(1:500, btsp_imp_df, mc.cores=20, mc.preschedule = FALSE)

@@ -16,7 +16,11 @@ btsp_calib_region_df <- function(seed.i, n.imp=100, sub_data = testt_subject_dat
                         FA_truth_regions=FA_truth_region,
                         roi.df = row_wm_100){
   set.seed(seed.i)
-  btsp.idx <- sample.idx[[seed.i]]
+  btsp.idx.all <- sample.idx[[seed.i]]
+  btsp.idx.calib <- btsp.idx.all[[1]]
+  btsp.idx.testing <- btsp.idx.all[[2]]
+  
+  btsp.idx <- c(btsp.idx.calib, btsp.idx.testing)
 
   calib.data <- FA_truth_regions[btsp.idx]
   regions <- calib.data[[1]]$names
@@ -35,7 +39,7 @@ btsp_calib_region_df <- function(seed.i, n.imp=100, sub_data = testt_subject_dat
     list.res.calib[[ROI]] <- data.frame(Estimate = estimate, StdError = stdError)
     
     # complete data only
-    calib.data.complete <- calib.data.all[1:250,]
+    calib.data.complete <- calib.data.all[1:length(btsp.idx.calib),]
     m0 <- lm(formulai, data=calib.data.complete)
     estimate <- m0$coefficients[2]
     stdError <- sqrt(vcovHC(m0, type = "HC3")[2,2])
@@ -44,8 +48,10 @@ btsp_calib_region_df <- function(seed.i, n.imp=100, sub_data = testt_subject_dat
   list.res.calib <- do.call(rbind, list.res.calib)
   rownames(list.res.calib) <- regions
   names(list.res.complete) <- regions
-  saveRDS(list.res.calib, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/truedata", seed.i, ".rds"))
-  saveRDS(list.res.complete, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/complete", seed.i, ".rds"))
+  # saveRDS(list.res.calib, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/truedata", seed.i, ".rds"))
+  # saveRDS(list.res.complete, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/complete", seed.i, ".rds"))
+  saveRDS(list.res.calib, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_mar/M3F7/truedata", seed.i, ".rds"))
+  saveRDS(list.res.complete, paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_mar/M3F7/complete", seed.i, ".rds"))
 }
 
 mclapply(1:500, btsp_calib_region_df, mc.cores=20, mc.preschedule = FALSE)

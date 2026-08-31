@@ -22,7 +22,7 @@ library(purrr)
 library(dplyr)
 library(paletteer)
 # documents
-# ~/ImImp/codeImputation/neuro/functions_imputation_simplified_2.R
+# ~/ImImp/codeImputation/neuro/functions_imputation_simplified_4.R
 ```
 
 # Data overview
@@ -77,7 +77,7 @@ for(i in 1:nrow(row_wm_100)){
 
 ```{r}
 ## calculate metrics: bias, se, etc for all methods
-all.data <- lapply(1:500, function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_100/simulation",i,".rds"))})
+all.data <- lapply(1:500, function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region_resample/simulation",i,".rds"))})
 # all.data.complete <- lapply(1:500,
                          # function(i){readRDS(file=paste0("/media/disk2/beijing_dti/Neuroimaging/imputation_region/complete", i, ".rds"))})
 # all.data <- Map(function(x, y) c(list(complete = y), x), all.data, all.data.complete)
@@ -244,7 +244,7 @@ p2_new <- ggplot(brain.df.all.new.2)+
   guides(fill = guide_legend(override.aes = list(width = NA)))+
   theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
   ggtitle(paste0("Standard Error Estimation Accuracy"))+
-  facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of Standard Deviation")
+  facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(fill="Phenotype", x="Methods", y="Ratio of Standard Error")
 p2_new
 
 
@@ -501,10 +501,10 @@ facet_wrap(~region, nrow=3, scales = "free")+xlab("")+ylab("Region Mean of FA")
 
 # Figure 3
 
-```{r fig.height=9, fig.width=7}
+```{r fig.height=12, fig.width=7}
 regions.plot <- c("Cingulum\nCingulate Gyrus", "Middle Temporal", "Splenium of\nCorpus Callosum")
 
-p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot))+
+p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot & methods != "MultSynth"))+
   geom_point(aes(y=bias.mean, x=methods), color = "#5D7A96", alpha=0.7, position=position_dodge(.9))+ scale_y_continuous(n.breaks = 3)+ 
   geom_hline(aes(yintercept=Estimate, linetype="True Parameter"), data=subset(truedata_100, regions %in% regions.plot), color="forestgreen", alpha=0.8)+
     scale_linetype_manual(values = c("True Parameter" = "dashed"),name = NULL) +
@@ -514,21 +514,21 @@ p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot))+
   ggtitle(paste0("Expected Value of Sex Group Difference"))+ylab("Difference in Region Mean")+
   facet_wrap(~regions, nrow=1, scales = "free_y")
 
-p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot))+
+p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
     guides(fill = guide_legend(override.aes = list(width = NA)))+
     theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Standard Error Estimation Accuracy"))+
     facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Ratio of Standard Error")
 
-p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot))+
+p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
     guides(fill = guide_legend(override.aes = list(width = NA)))+
     theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Relative RMSE (v.s. full data estimator)"))+
     facet_wrap(~regions, ncol=5, scales = "free_y")+ labs( x="Methods", y="Ratio of RMSE")
 
-p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot))+
+p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), color="forestgreen") +
     scale_linetype_manual(values = c("95% CI Target" = "dashed"), name=NULL) +
@@ -545,7 +545,7 @@ ggarrange(p1_new_f3, p2_new_f3, p3_new_f3, p4_new_f3, nrow=4)
 
 ```{r fig.width=10, fig.height=7}
 regions.plot <- c("Middle Temporal")
-p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot ))+
+p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot& methods != "MultSynth" ))+
   geom_point(aes(y=bias.mean, x=methods),size=2, color = "#5D7A96", alpha=0.7, position=position_dodge(.9))+ scale_y_continuous(n.breaks = 3)+ 
   geom_hline(aes(yintercept=Estimate, linetype="True Parameter"), data=subset(truedata_100, regions %in% regions.plot), color="forestgreen", alpha=0.8)+
     scale_linetype_manual(values = c("True Parameter" = "dashed"),name = NULL) +
@@ -555,21 +555,21 @@ p1_new_f3 <- ggplot(subset(brain.df.all.new, regions %in% regions.plot ))+
   ggtitle(paste0("Expected Value of Sex Group Difference"))+ylab("Difference in Region Mean")+
   facet_wrap(~regions, nrow=1, scales = "free_y")
 
-p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot))+
+p2_new_f3 <-  ggplot(subset(brain.df.all.new.2, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
     guides(fill = guide_legend(override.aes = list(width = NA)))+
     theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Standard Error Estimation Accuracy"))+
     facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Ratio of Standard Error")
 
-p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot))+
+p3_new_f3 <- ggplot(subset(brain.df.ratio.new, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(yintercept = 1, linetype="dashed", alpha=0.6, color="forestgreen")+
     guides(fill = guide_legend(override.aes = list(width = NA)))+
     theme_minimal()+theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+ggtitle(paste0("Relative RMSE (v.s. full data estimator)"))+
     facet_wrap(~regions, ncol=5, scales = "free_y")+ labs( x="Methods", y="Ratio of RMSE")
 
-p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot))+
+p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot& methods != "MultSynth"))+
   geom_bar(stat="identity",aes(y=sd.ratio, x=methods), fill="#5D7A96", width=0.45, alpha=0.7, position=position_dodge())+
     geom_hline(aes(yintercept = 0.95, linetype = "95% CI Target"), color="forestgreen") +
     scale_linetype_manual(values = c("95% CI Target" = "dashed"), name=NULL) +
@@ -580,5 +580,25 @@ p4_new_f3 <- ggplot(subset(brain.df.ratio.new.4, regions %in% regions.plot))+
     facet_wrap(~regions, ncol=5, scales = "free_y")+ labs(x="Methods", y="Coverage")
 
 ggarrange(p1_new_f3, p2_new_f3, p3_new_f3, p4_new_f3, nrow=2, ncol=2)
+```
+
+## Checking R squared
+```{r}
+FA_synth_region <- readRDS("/media/disk2/beijing_dti/Neuroimaging/FA_synth_region.rds")
+FA_truth_region <- readRDS("/media/disk2/beijing_dti/Neuroimaging/FA_truth_region.rds")
+
+# melt the values into vector
+# function extracting a certain region
+extract_fun <- function(df,region_idx){df$values[region_idx]}
+rsq <- rep(NA, nrow(FA_synth_region[[1]]))
+for(i in 1:nrow(FA_synth_region[[1]])){
+  region_values <- data.frame(synth = unlist(lapply(FA_synth_region, extract_fun, region_idx=i)),
+                            truth = unlist(lapply(FA_truth_region, extract_fun, region_idx=i)))
+  m1 <- lm(synth~truth, data = region_values)
+  rsq[i] <- summary(m1)$r.squared
+}
+rsq
+summary(rsq)
+
 ```
 
