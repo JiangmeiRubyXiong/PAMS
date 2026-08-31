@@ -3,6 +3,8 @@ This repository hosts code for the analysis in manuscript:
 **Facilitating Valid Statistical Inference in Biomedical Image
 Synthesis**
 
+PAMS stands for Phenotype Aware Multiple Synthesis
+
 This paper analyzes three datasets in sepeate sections, corresponding to the three folders in this repository: 
 - Neuroimaging: [Beijing DTI](https://fcon_1000.projects.nitrc.org/indi/retro/BeijingEnhanced.html) 
 - Cell-level multiplexed immunofluorescence (mIF): Coordinated cellular neighborhoods orchestrate antitumoral immunity at the colorectal cancer invasive front. Data is available at [Mendeley Data](https://data.mendeley.com/datasets/mpjzbtfgfr/1) 
